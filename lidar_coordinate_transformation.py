@@ -83,8 +83,8 @@ def create_maps(image_coordinates:np.array, image_arr:np.array):
         
         # Check if the projected pixel coordinates are within image bounds
         if 0 <= x_pixel < image_shape[1] and 0 <= y_pixel < image_shape[0]:
-            depth_map[y_pixel, x_pixel] += depth_c
-            reflectance_map[y_pixel, x_pixel] += intensity_l
+            depth_map[y_pixel, x_pixel] = depth_c
+            reflectance_map[y_pixel, x_pixel] = intensity_l
             
     for point in image_coordinates:
         x_img, y_img, z_c, I_l = point
@@ -101,9 +101,13 @@ def save_as_png(depth_map, reflectance_map, depth_file='depth_map.png', reflecta
     reflectance_normalized = cv2.normalize(reflectance_map, None, 0, 255, cv2.NORM_MINMAX)
     reflectance_normalized = reflectance_normalized.astype(np.uint8)  # Convert to unsigned 8-bit integer
 
+    # Apply colormap
+    depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+    reflectance_colored = cv2.applyColorMap(reflectance_normalized, cv2.COLORMAP_JET)
+
     # Save the images
-    cv2.imwrite(depth_file, depth_normalized)
-    cv2.imwrite(reflectance_file, reflectance_normalized)
+    cv2.imwrite(depth_file, depth_colored)
+    cv2.imwrite(reflectance_file, reflectance_colored)
             
 def transform_lidar_sample(lidar_bin_file_path:str, calib_file_path:str, image_fn:str):
     
