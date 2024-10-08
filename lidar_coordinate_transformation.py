@@ -1,12 +1,6 @@
-import numpy as np
+import numpy as np 
 import cv2
-
-def upscale_with_bilateral_filter(depth_map, reflectance_map):
-    # Apply bilateral filtering
-    depth_map_filtered = cv2.bilateralFilter(depth_map, d=9, sigmaColor=75, sigmaSpace=75)
-    reflectance_map_filtered = cv2.bilateralFilter(reflectance_map, d=9, sigmaColor=75, sigmaSpace=75)
-
-    return depth_map_filtered, reflectance_map_filtered
+import matplotlib.pyplot as plt
 
 def read_image(image_path:str):
     return cv2.imread(image_path)
@@ -29,68 +23,91 @@ def read_calibration_file(calib_file_path):
                 key, value = line.split(':')
                 calibration_dict[key.strip()] = np.fromstring(
                     value, sep=' '
-                ).reshape(-1, 3)
+                )
                 
-    calibration_dict['Tr_velo_to_cam'] = np.hstack(
-        (calibration_dict['Tr_velo_to_cam'], np.array([[0], [0], [0], [1]]))
-    ).T
-        
     return calibration_dict
 
-def transform_lidar_to_camera(lidar_points:np.array, tr_velo_to_cam:np.array):
+def transform_lidar_to_camera(point_cloud_array:np.array, calibration_dict:dict):
     
-    if lidar_points.shape[-1] > 3:
-        lidar_points = lidar_points[:, :3]
+    # ignoring the last_dim as it corresponds to intensity.
+    if point_cloud_array.shape[-1] > 3:
+        point_cloud_array = point_cloud_array[:, :3]    #(N, 3)
     
-    lidar_points_homogeneous = np.hstack(
-        (lidar_points, np.ones((lidar_points.shape[0], 1)))
-    )
+    #reshaping rectification matrix from (12,) to (3,3)
+    r0_rect = calibration_dict['R0_rect'].reshape(3,3) #(3,3)
+    r0_rect_homo = np.vstack([r0_rect, [0, 0, 0]]) #(4,3)
+    r0_rect_homo = np.column_stack([r0_rect_homo, [0, 0, 0, 1]]) #(4,4)
     
-    lidar_transformed_cam = lidar_points_homogeneous @ tr_velo_to_cam
-    lidar_transformed_cam = lidar_transformed_cam[:,:3]
+    # reshaping projection_matrix from (12,) to (3,4)
+    proj_mat = calibration_dict['P2'].reshape(3,4) 
     
-    return lidar_transformed_cam
+    # reshaping Tr_velo_to_cam from (12,) to (3,4)
+    v2c = calibration_dict['Tr_velo_to_cam'].reshape(3,4)
+    v2c = np.vstack(
+        (v2c, [0, 0, 0, 1])
+    ) #(4,4)    
+    
+    p_r0 = np.dot(proj_mat, r0_rect_homo) # (3, 4)
+    p_r0_rt = np.dot(p_r0, v2c) #(3, 4)
+    
+    point_cloud_array = np.column_stack(
+        [point_cloud_array, np.ones((point_cloud_array.shape[0], 1))]
+    ) # (N, 4)
+    
+    #(3, 4) dot (4, N) ---> (3, N) ---> (N, 3)
+    p_r0_rt_x = np.dot(
+        p_r0_rt, point_cloud_array.T
+    ).T 
+    
+    # The transformed coordinates are for LIDAR (u, v, z) to (u', v', z') in Image. Normalize by depth (z')
+    p_r0_rt_x[:, 0] /= p_r0_rt_x[:, -1]
+    p_r0_rt_x[:, 1] /= p_r0_rt_x[:, -1]
+    
+    return p_r0_rt_x[:, :2], p_r0_rt_x[:, -1]
 
-def project_to_image_coordinates(lidar_transformed_cam:np.array, projection_matrix:np.array):
-    
-    lidar_transformed_cam_homo = np.hstack(
-        (lidar_transformed_cam, np.ones((lidar_transformed_cam.shape[0], 1)))
-    )
-    
-    image_coordinates_homo = projection_matrix.T @ lidar_transformed_cam_homo.T
-        
-    x_img = image_coordinates_homo[0]/image_coordinates_homo[2]
-    y_img = image_coordinates_homo[1]/image_coordinates_homo[2]
-        
-    image_coordinates = np.vstack((x_img, y_img)).T
-    
-    image_coordinates = np.concatenate((
-        [image_coordinates, np.expand_dims(lidar_transformed_cam[:, -1], axis=1)]
-    ), axis=1)
-            
-    return image_coordinates
+def create_maps(projected_points:np.array, y_max, x_max, intensities:np.array, depths:np.array):
 
-def create_maps(image_coordinates:np.array, image_arr:np.array):
+    reflectance_map = np.zeros((y_max, x_max), dtype=np.float32)
+    depth_map = np.zeros((y_max, x_max), dtype=np.float32)    
     
-    depth_map = np.zeros_like(image_arr, dtype=np.float32)
-    reflectance_map = np.zeros_like(image_arr, dtype=np.float32)
+    # Fill in the reflectance and depth maps
+    for i in range(len(projected_points)):
+        x, y = int(projected_points[i, 0]), int(projected_points[i, 1])
+        if 0 <= x < x_max and 0 <= y < y_max:
+            # Use maximum intensity for reflectance
+            reflectance_map[y, x] = max(reflectance_map[y, x], intensities[i])
+            # Use the closest depth value
+            if depth_map[y, x] == 0:  # if depth is not set yet
+                depth_map[y, x] = depths[i]
+
+    # Normalize reflectance map for visualization
+    reflectance_map = (reflectance_map / np.max(reflectance_map) * 255).astype(np.uint8)
+    depth_map = (depth_map / np.max(depth_map) * 255).astype(np.uint8)
     
-    image_shape = image_arr.shape
-    
-    def fill_maps(x_img, y_img, depth_c, intensity_l):
-        x_pixel = int(round(x_img))
-        y_pixel = int(round(y_img))
-        
-        # Check if the projected pixel coordinates are within image bounds
-        if 0 <= x_pixel < image_shape[1] and 0 <= y_pixel < image_shape[0]:
-            depth_map[y_pixel, x_pixel] = depth_c
-            reflectance_map[y_pixel, x_pixel] = intensity_l
-            
-    for point in image_coordinates:
-        x_img, y_img, z_c, I_l = point
-        fill_maps(x_img, y_img, z_c, I_l)
-        
-    return upscale_with_bilateral_filter(depth_map, reflectance_map)    
+    return upscale_with_bilateral_filter(depth_map, reflectance_map)
+
+def upscale_with_bilateral_filter(depth_map, reflectance_map):
+    # Apply bilateral filtering
+    depth_map_filtered = cv2.bilateralFilter(depth_map, d=9, sigmaColor=75, sigmaSpace=75)
+    reflectance_map_filtered = cv2.bilateralFilter(reflectance_map, d=9, sigmaColor=75, sigmaSpace=75)
+
+    return depth_map_filtered, reflectance_map_filtered
+
+def visualize_maps(reflectance_map: np.array, depth_map: np.array):
+    plt.figure(figsize=(15, 7))
+
+    plt.subplot(1, 2, 1)
+    plt.title('Reflectance Map')
+    plt.imshow(reflectance_map, cmap='gray')
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.title('Depth Map')
+    plt.imshow(depth_map, cmap='jet')
+    plt.axis('off')
+
+    # plt.show()
+    plt.savefig('depth_reflectance.png', bbox_inches='tight', pad_inches=0)
 
 def save_as_png(depth_map, reflectance_map, depth_file='depth_map.png', reflectance_file='reflectance_map.png'):
     # Normalize the depth map to 0-255
@@ -108,29 +125,47 @@ def save_as_png(depth_map, reflectance_map, depth_file='depth_map.png', reflecta
     # Save the images
     cv2.imwrite(depth_file, depth_colored)
     cv2.imwrite(reflectance_file, reflectance_colored)
-            
+
 def transform_lidar_sample(lidar_bin_file_path:str, calib_file_path:str, image_fn:str):
     
     point_cloud_array = read_velodyne_bin(lidar_bin_file_path) #(X_l, Y_l, Z_l, I_l)
     calibration_dict = read_calibration_file(calib_file_path)
     image_array = read_image(image_fn)
-        
-    lidar_transformed_cam = transform_lidar_to_camera(
-        point_cloud_array, calibration_dict['Tr_velo_to_cam']
-    ) #(X_c, Y_c, Z_c)
-
-    image_coordinates = project_to_image_coordinates(
-        lidar_transformed_cam, calibration_dict['P2']
-    ) #(X_img, Y_img, Z_c)
-                    
-    #(X_img, Y_img, Z_c, I_l)
-    image_coordinates = np.concatenate([image_coordinates, 
-                                               np.expand_dims(point_cloud_array[:,-1], axis=1)], axis=1) 
     
-    depth_map, reflectance_map = create_maps(image_coordinates, image_array)
-        
-    save_as_png(depth_map, reflectance_map)
+    points_2d, depths = transform_lidar_to_camera(
+        point_cloud_array, calibration_dict
+    )
+    
+    x_min, y_min = 0, 0
+    x_max, y_max = image_array.shape[1], image_array.shape[0]
+    clip_distance = 2.0
+    
+    fov_inds = (
+            (points_2d[:, 0] < x_max)
+            & (points_2d[:, 0] >= x_min)
+            & (points_2d[:, 1] < y_max)
+            & (points_2d[:, 1] >= y_min)
+    )    
+    
+    fov_inds = fov_inds & (
+                point_cloud_array[:, 0] > clip_distance)
+    
+    imgfov_pc_velo = point_cloud_array[fov_inds, :]
+    projected_points = points_2d[fov_inds]
 
+    reflectance_map = np.zeros((y_max, x_max), dtype=np.float32)
+    depth_map = np.zeros((y_max, x_max), dtype=np.float32)    
+    
+    depth_map, reflectance_map = create_maps(
+        projected_points, y_max, x_max,
+        point_cloud_array[fov_inds, 3],
+        point_cloud_array[fov_inds, 2]
+        # depths[fov_inds]
+    )
+    
+    # visualize_maps(reflectance_map, depth_map)
+    save_as_png(depth_map, reflectance_map)
+                
 if __name__ == "__main__":
     # Path to your .bin file
     lidar_bin_file_path = "dev_datakit/velodyne/training/000044.bin"  #CHANGE
@@ -139,6 +174,4 @@ if __name__ == "__main__":
     
     transform_lidar_sample(
         lidar_bin_file_path, calib_file_path, image_path
-    )
-    
-    
+    )    
