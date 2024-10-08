@@ -150,7 +150,7 @@ def transform_lidar_sample(lidar_bin_file_path:str, calib_file_path:str, image_f
     fov_inds = fov_inds & (
                 point_cloud_array[:, 0] > clip_distance)
     
-    imgfov_pc_velo = point_cloud_array[fov_inds, :]
+    # imgfov_pc_velo = point_cloud_array[fov_inds, :]
     projected_points = points_2d[fov_inds]
 
     reflectance_map = np.zeros((y_max, x_max), dtype=np.float32)
@@ -158,8 +158,8 @@ def transform_lidar_sample(lidar_bin_file_path:str, calib_file_path:str, image_f
     
     depth_map, reflectance_map = create_maps(
         projected_points, y_max, x_max,
-        point_cloud_array[fov_inds, 3],
-        point_cloud_array[fov_inds, 2]
+        point_cloud_array[fov_inds, -1],
+        point_cloud_array[fov_inds, -2]
         # depths[fov_inds]
     )
     
