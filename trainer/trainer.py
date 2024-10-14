@@ -11,6 +11,13 @@ class Trainer:
     def __init__(self, model:Darknet, 
                 dataset_kwargs:dict, optimizer_kwargs:dict,
                 trainer_kwargs:dict, lr_scheduler_kwargs:dict):
+        
+        ''' 
+        TODO
+        1. Add Logs after _init_dataloader, _init_optimizer 
+        2. Implement Callbacks for model checkpointing 
+        3. Complete Validation methods 
+        '''
                 
         self.model = model 
         
