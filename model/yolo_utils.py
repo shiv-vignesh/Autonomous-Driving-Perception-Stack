@@ -1,3 +1,4 @@
+import numpy as np
 import torch.nn as nn
 
 def weights_init_normal(m):
@@ -27,3 +28,19 @@ def parse_model_config(path):
             module_defs[-1][key.rstrip()] = value.strip()
 
     return module_defs
+
+def xywh2xyxy(x):
+    y = x.new(x.shape)
+    y[..., 0] = x[..., 0] - x[..., 2] / 2
+    y[..., 1] = x[..., 1] - x[..., 3] / 2
+    y[..., 2] = x[..., 0] + x[..., 2] / 2
+    y[..., 3] = x[..., 1] + x[..., 3] / 2
+    return y
+
+def xywh2xyxy_np(x):
+    y = np.zeros_like(x)
+    y[..., 0] = x[..., 0] - x[..., 2] / 2
+    y[..., 1] = x[..., 1] - x[..., 3] / 2
+    y[..., 2] = x[..., 0] + x[..., 2] / 2
+    y[..., 3] = x[..., 1] + x[..., 3] / 2
+    return y
