@@ -10,6 +10,13 @@
             "shuffle":true
         },
         "validation_dataset_kwargs":{
+            "lidar_dir":"data/dev_datakit/velodyne/testing",
+            "calibration_dir":"data/calibration/testing/calib",
+            "left_image_dir":"data/dev_datakit/image_left/testing",
+            "right_image_dir":null,
+            "labels_dir":"data/left_image_labels/training/label_2",
+            "train_batch_size":1,
+            "shuffle":true            
         }, 
         "image_resize":[416, 416], 
         "perform_validation":false
