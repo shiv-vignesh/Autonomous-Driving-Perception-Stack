@@ -1,9 +1,11 @@
+from tqdm import tqdm
 import torch, time
 import os
 from torch.utils.data import DataLoader
 
 from .logger import Logger
 from model.yolo import Darknet
+from model.yolo_utils import xywh2xyxy
 from dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
 from trainer.loss import compute_loss
 
@@ -48,13 +50,47 @@ class Trainer:
         self.model.to(self.device)
         
         self._init_dataloader(dataset_kwargs)
+        
+        self.logger.log_line()
+        self.logger.log_message(f'Train Dataloader:')
+        self.logger.log_new_line()
+        
+        self.logger.log_message(f'LiDAR Dir: {self.train_dataloader.dataset.lidar_dir}')        
+        self.logger.log_message(f'Calibration Dir: {self.train_dataloader.dataset.calibration_dir}')
+        self.logger.log_message(f'Left Image Dir: {self.train_dataloader.dataset.left_image_dir}')
+        self.logger.log_message(f'Right Image Dir: {self.train_dataloader.dataset.right_image_dir}')
+        self.logger.log_message(f'Labels Dir: {self.train_dataloader.dataset.labels_dir}')
+        self.logger.log_message(f'Train Batch Size: {self.train_dataloader.batch_size}')
+        
+        self.logger.log_line()
+        
+        self.logger.log_line()
+        self.logger.log_message(f'Validation Dataloader:')
+        self.logger.log_new_line()
+        
+        self.logger.log_message(f'LiDAR Dir: {self.validation_dataloader.dataset.lidar_dir}')        
+        self.logger.log_message(f'Calibration Dir: {self.validation_dataloader.dataset.calibration_dir}')
+        self.logger.log_message(f'Left Image Dir: {self.validation_dataloader.dataset.left_image_dir}')
+        self.logger.log_message(f'Right Image Dir: {self.validation_dataloader.dataset.right_image_dir}')
+        self.logger.log_message(f'Labels Dir: {self.validation_dataloader.dataset.labels_dir}')
+        self.logger.log_message(f'Train Batch Size: {self.validation_dataloader.batch_size}')
+        
+        self.logger.log_line()        
+        
         self._init_optimizer(optimizer_kwargs)
+        self.logger.log_line()
+        self.logger.log_message(f'Optimizer: {self.optimizer.__class__.__name__}')
+        self.logger.log_new_line()
         
         if lr_scheduler_kwargs:
             self._init_lr_scheduler(lr_scheduler_kwargs)
             
         self.total_train_batch = len(self.train_dataloader)
-        self.ten_percent_train_batch = self.total_train_batch // 10             
+        self.ten_percent_train_batch = self.total_train_batch // 10     
+        
+        self.logger.log_line()
+        self.logger.log_message(f'Device: {self.device} and Device Count: {self.device_count}')
+        self.logger.log_new_line()                
         
     def _init_dataloader(self, dataset_kwargs:dict):        
         def create_dataloader(kwargs:dict, image_resize:tuple):
@@ -133,6 +169,10 @@ class Trainer:
         self.logger.log_new_line()
         
         self.total_training_time = 0.0
+        
+        self.valid_one_epoch()
+        
+        exit(1)
 
         for epoch in range(self.epochs):
             self.cur_epoch = epoch
@@ -225,8 +265,7 @@ class Trainer:
         )
                                       
                     
-    def train_one_step(self, data_items:dict):
-    
+    def train_one_step(self, data_items:dict):    
         with torch.set_grad_enabled(True):  
             outputs = self.model(data_items['images'])
             loss, loss_components = compute_loss(outputs, data_items['targets'], self.model)                        
@@ -236,5 +275,25 @@ class Trainer:
         return loss, loss_components      
     
     def valid_one_epoch(self):
+
+        self.model.eval()
         
-        pass
+        labels = []
+        sample_metrics = []  # List of tuples (TP, confs, pred)
+        
+        val_epoch_iter = tqdm(self.validation_dataloader)   
+
+        labels = []
+        sample_metrics = []  # List of tuples (TP, confs, pred)
+        
+        for batch_idx, data_items in enumerate(val_epoch_iter):
+            for k,v in data_items.items():
+                if torch.is_tensor(v):                    
+                    data_items[k] = v.to(self.device)
+                    
+            with torch.no_grad():
+                outputs = self.model(data_items['images'])
+                loss, loss_components = compute_loss(outputs, data_items['targets'], self.model)                        
+                
+            targets = data_items['targets']
+            print(targets.size())
