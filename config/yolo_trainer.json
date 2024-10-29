@@ -1,20 +1,20 @@
 {
     "dataset_kwargs":{
         "trainer_dataset_kwargs":{
-            "lidar_dir":"data/dev_datakit/velodyne/training",
+            "lidar_dir":"data/velodyne/training/velodyne",
             "calibration_dir":"data/calibration/training/calib",
-            "left_image_dir":"data/dev_datakit/image_left/training",
+            "left_image_dir":"data/left_images/training/image_2",
             "right_image_dir":null,
-            "labels_dir":"data/left_image_labels/training/label_2",
+            "labels_dir":"data/labels/training/label_2",
             "train_batch_size":1,
             "shuffle":true
         },
         "validation_dataset_kwargs":{
-            "lidar_dir":"data/dev_datakit/velodyne/testing",
-            "calibration_dir":"data/calibration/testing/calib",
-            "left_image_dir":"data/dev_datakit/image_left/testing",
+            "lidar_dir":"data/velodyne/validation/velodyne",
+            "calibration_dir":"data/calibration/validation/calib",
+            "left_image_dir":"data/left_images/validation/image_2",
             "right_image_dir":null,
-            "labels_dir":"data/left_image_labels/training/label_2",
+            "labels_dir":"data/labels/validation/label_2",
             "train_batch_size":1,
             "shuffle":true            
         }, 
@@ -28,7 +28,7 @@
     "lr_scheduler_kwargs":{
     },
     "trainer_kwargs":{
-        "output_dir": "devDataTraining",
+        "output_dir": "debugging",
         "is_training":true,
         "first_val_epoch": 0,
         "metric_eval_mode": "strict",
@@ -37,7 +37,8 @@
         "monitor_train": true,
         "monitor_val": true,
         "gradient_clipping": 1.0,
-        "device": "cuda"    
+        "device": "cuda", 
+        "checkpoint_idx":10
     },
     "callback_kwargs":{
     }
