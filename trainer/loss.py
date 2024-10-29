@@ -56,7 +56,7 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=
         return iou  # IoU
 
 
-def compute_loss(predictions, targets, model):
+def compute_loss(predictions, targets, model, eval_debug:bool=False):
     # Check which device was used
     device = targets.device
 
@@ -119,6 +119,11 @@ def compute_loss(predictions, targets, model):
     lbox *= 0.05
     lobj *= 1.0
     lcls *= 0.5
+    
+    if eval_debug:
+        # print(f'lbox + lobj + lcls: {lbox} + {lobj} + {lcls}')
+        pass
+        
 
     # Merge losses
     loss = lbox + lobj + lcls
@@ -135,12 +140,13 @@ def build_targets(p, targets, model):
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)
     # Copy target boxes anchor size times and append an anchor index to each copy the anchor index is also expressed by the new first dimension
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)
-
+    
     for i, yolo_layer in enumerate(model.yolo_layers):
         # Scale anchors by the yolo grid cell size so that an anchor with the size of the cell would result in 1
         anchors = yolo_layer.anchors / yolo_layer.stride
         # Add the number of yolo cells in this layer the gain tensor
         # The gain tensor matches the collums of our targets (img id, class, x, y, w, h, anchor id)
+
         gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
         # Scale targets by the number of yolo layer cells, they are now in the yolo cell coordinate system
         t = targets * gain
