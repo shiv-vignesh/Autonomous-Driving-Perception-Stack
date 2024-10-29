@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .yolo_utils import parse_model_config, weights_init_normal
+from .yolo_utils import parse_model_config
 
 
 def create_modules(module_defs: List[dict]) -> Tuple[dict, nn.ModuleList]:
@@ -142,7 +142,7 @@ class YOLOLayer(nn.Module):
         self.new_coords = new_coords
         self.mse_loss = nn.MSELoss()
         self.bce_loss = nn.BCELoss()
-        self.no = num_classes + 5  # number of outputs per anchor
+        self.no = num_classes + 5  # number of outputs per anchor, 5 --> xywh & objectness_score
         self.grid = torch.zeros(1)  # TODO
 
         anchors = torch.tensor(list(chain(*anchors))).float().view(-1, 2)
@@ -160,23 +160,43 @@ class YOLOLayer(nn.Module):
         """
         stride = img_size // x.size(2)
         self.stride = stride
-        bs, _, ny, nx = x.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+        
+        # x(bs,(num_classes + 5) * num_anchors,x,y) to x(bs,3,x,y, num_classes + 5)
+        # x, y --> [(13,13),(26,26),(52,52)]
+        bs, _, ny, nx = x.shape  
         x = x.view(bs, self.num_anchors, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
-
-        if not self.training:  # inference
-            if self.grid.shape[2:4] != x.shape[2:4]:
-                self.grid = self._make_grid(nx, ny).to(x.device)
-
-            if self.new_coords:
-                x[..., 0:2] = (x[..., 0:2] + self.grid) * stride  # xy
-                x[..., 2:4] = x[..., 2:4] ** 2 * (4 * self.anchor_grid) # wh
-            else:
-                x[..., 0:2] = (x[..., 0:2].sigmoid() + self.grid) * stride  # xy
-                x[..., 2:4] = torch.exp(x[..., 2:4]) * self.anchor_grid # wh
-                x[..., 4:] = x[..., 4:].sigmoid() # conf, cls
+        
+        if not self.training:
             x = x.view(bs, -1, self.no)
-
+        
         return x
+
+        # if not self.training:  # inference
+        #     # print(f'Within Inference If')
+        #     if self.grid.shape[2:4] != x.shape[2:4]:
+        #         self.grid = self._make_grid(nx, ny).to(x.device)
+                
+
+            # if self.new_coords:
+            #     x[..., 0:2] = (x[..., 0:2] + self.grid) * stride  # xy
+            #     x[..., 2:4] = x[..., 2:4] ** 2 * (4 * self.anchor_grid) # wh     
+            #     print(f'New Coords')           
+            # else:
+            #     # x[..., 0:2] = (x[..., 0:2].sigmoid() + self.grid) * stride  # xy
+            #     # x[..., 2:4] = torch.exp(x[..., 2:4]) * self.anchor_grid # wh
+            #     # x[..., 4:] = x[..., 4:].sigmoid() # conf, cls
+                
+            #     '''Commented sigmoid() as it results in NaN while computing loss'''
+            #     '''Applying sigmoid within trainer while computing IOU and Accuracy'''
+                
+            #     # x[..., 0:2] = (x[..., 0:2] + self.grid) * stride  # xy
+            #     # x[..., 2:4] = x[..., 2:4] ** 2 * (4 * self.anchor_grid) # wh 
+                
+            #     print(f'Last Else')
+                              
+            
+            # exit(1)
+
 
     @staticmethod
     def _make_grid(nx: int = 20, ny: int = 20) -> torch.Tensor:
@@ -220,7 +240,8 @@ class Darknet(nn.Module):
                 x = module[0](x, img_size)
                 yolo_outputs.append(x)
             layer_outputs.append(x)
-        return yolo_outputs if self.training else torch.cat(yolo_outputs, 1)
+        # return yolo_outputs if self.training else torch.cat(yolo_outputs, 1)        
+        return yolo_outputs
 
     def load_darknet_weights(self, weights_path):
         """Parses and loads the weights stored in 'weights_path'"""
@@ -317,28 +338,3 @@ class Darknet(nn.Module):
         fp.close()
 
 
-def load_model(model_path, weights_path=None):
-    """Loads the yolo model from file.
-
-    :param model_path: Path to model definition file (.cfg)
-    :type model_path: str
-    :param weights_path: Path to weights or checkpoint file (.weights or .pth)
-    :type weights_path: str
-    :return: Returns model
-    :rtype: Darknet
-    """
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          else "cpu")  # Select device for inference
-    model = Darknet(model_path).to(device)
-
-    model.apply(weights_init_normal)
-
-    # If pretrained weights are specified, start from checkpoint or weight file
-    if weights_path:
-        if weights_path.endswith(".pth"):
-            # Load checkpoint weights
-            model.load_state_dict(torch.load(weights_path, map_location=device))
-        else:
-            # Load darknet weights
-            model.load_darknet_weights(weights_path)
-    return model
