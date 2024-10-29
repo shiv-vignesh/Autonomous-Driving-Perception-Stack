@@ -275,7 +275,8 @@ class KittiLidarFusionCollateFn(object):
         
         batch_data_items = {
             "images": [], #list of tensors --> stack --> tensor (bs, n_c, h, w),
-            "targets": []
+            "targets": [],
+            "image_paths":[]
             # "bboxes":[], # list of list of list [bs * [num_labels * [x,y,x,y] ]] (inner list of 4 elements)
             # "class_labels":[] # list of list of class_labels [bs * [num_labels] ] (inner list is class_ids)
         }
@@ -304,9 +305,11 @@ class KittiLidarFusionCollateFn(object):
             
             if bool(left_image_file_path) and os.path.exists(left_image_file_path):
                 left_image_arr = self.read_image(left_image_file_path)
+                batch_data_items['image_paths'].append(left_image_file_path)
             
             if bool(right_image_file_path) and os.path.exists(right_image_file_path):
                 right_image_arr = self.read_image(right_image_file_path)    
+                batch_data_items['image_paths'].append(right_image_file_path)
                 
             if left_image_arr is None and right_image_arr is None:
                 print(f'Left Image Path {left_image_file_path} and Right Image Path {right_image_file_path}')
@@ -327,7 +330,9 @@ class KittiLidarFusionCollateFn(object):
                 combined_image = np.concatenate([
                     right_image_arr, depth_map, reflectance_map
                 ], axis=-1)  
-
+                        
+            # combined_image = left_image_arr
+            
             if label_file_path is not None:
                 if os.path.exists(label_file_path):
                     class_labels, label_bboxes = self.read_label_file(label_file_path)                
