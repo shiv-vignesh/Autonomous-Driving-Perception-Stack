@@ -271,6 +271,35 @@ class Darknet(nn.Module):
                 break
             if module_def["type"] == "convolutional":
                 conv_layer = module[0]
+                # Conv2d(5, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+                # Conv2d(3, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+                
+                ''' 
+                Original input layer is 
+                    torch.Size([32, 3, 3, 3])
+                Modified input layer is 
+                    torch.Size([32, 3 + lidar_channels, 3, 3])
+                    
+                Numel() from original = 864
+                '''
+                                
+                if i == 0 and self.hyperparams['channels'] > 3:                    
+                    numel_original = 864                                        
+                    original_weights = torch.from_numpy(
+                        weights[ptr:ptr+numel_original]).view(
+                            [32, 3, 3, 3]
+                        )
+                    
+                    repeating_channels = self.hyperparams['channels'] - 3
+                    avg_weights = original_weights.mean(dim=1, keepdim=True)   
+                    avg_weights = avg_weights.repeat(1, repeating_channels, 1, 1)                 
+                    
+                    new_weights = torch.cat((original_weights, avg_weights), dim=1)
+                    conv_layer.weight.data.copy_(new_weights)                    
+
+                    ptr += numel_original
+                    continue
+                
                 if module_def["batch_normalize"]:
                     # Load BN bias, weights, running mean and running variance
                     bn_layer = module[1]
