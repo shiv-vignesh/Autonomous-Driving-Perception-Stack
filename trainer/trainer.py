@@ -176,15 +176,7 @@ class Trainer:
         self.total_training_time = 0.0
         
         self.cur_epoch = 0        
-        
-        self.model.load_state_dict(
-            torch.load('devDataTraining_rgb_Lidar/yolo_weights_59.pth', map_location=self.device)
-        )
-        
-        self.valid_one_epoch()
-        
-        exit(1)
-
+                
         for epoch in range(self.epochs):
             self.cur_epoch = epoch
             self.logger.log_line()
