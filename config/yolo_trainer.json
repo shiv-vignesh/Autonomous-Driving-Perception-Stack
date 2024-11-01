@@ -28,7 +28,7 @@
     "lr_scheduler_kwargs":{
     },
     "trainer_kwargs":{
-        "output_dir": "debugging",
+        "output_dir": "pretrained_darknet53_rgb_Lidar",
         "is_training":true,
         "first_val_epoch": 0,
         "metric_eval_mode": "strict",
