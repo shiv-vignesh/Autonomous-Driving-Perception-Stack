@@ -2,7 +2,7 @@ from __future__ import division
 
 import os
 from itertools import chain
-from typing import List, Tuple
+from typing import List, Tuple, Iterable
 
 import numpy as np
 import torch
@@ -139,6 +139,7 @@ class YOLOLayer(nn.Module):
         super(YOLOLayer, self).__init__()
         self.num_anchors = len(anchors)
         self.num_classes = num_classes
+
         self.new_coords = new_coords
         self.mse_loss = nn.MSELoss()
         self.bce_loss = nn.BCELoss()
@@ -165,7 +166,6 @@ class YOLOLayer(nn.Module):
         # x, y --> [(13,13),(26,26),(52,52)]
         bs, _, ny, nx = x.shape  
         x = x.view(bs, self.num_anchors, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
-        
         if not self.training:
             x = x.view(bs, -1, self.no)
         
@@ -221,13 +221,41 @@ class Darknet(nn.Module):
                             for layer in self.module_list if isinstance(layer[0], YOLOLayer)]
         self.seen = 0
         self.header_info = np.array([0, 0, 0, self.seen, 0], dtype=np.int32)
+        
+        self.identify_detection_head_indices()
+
+    def identify_detection_head_indices(self):                
+        
+        ''' 
+        REQUIRED For Detection head forward pass after adaptive fusion.
+        contains tuple of [(i-1, i)] or [(i, i+1)]
+            i-1 or i:
+                preceeding conv that downsamples from 
+                latent_space to filters=$(expr 3 \* $(expr $NUM_CLASSES \+ 5))
+            i or i+1: 
+                YOLO detection head 
+        '''
+        self.detection_head_indices = []
+        self.detection_head_names = []
+        for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
+            if (
+                module_def["type"] == "convolutional"
+                and i + 1 < len(self.module_defs)
+                and self.module_defs[i + 1]["type"] == "yolo"
+            ):
+                self.detection_head_indices.append(
+                    (i, i+1)
+                )               
+                self.detection_head_names.append(
+                    (self.module_defs[i], self.module_defs[i+1])
+                )         
 
     def forward(self, x):
         img_size = x.size(2)
         layer_outputs, yolo_outputs = [], []
         for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
-            if module_def["type"] in ["convolutional", "upsample", "maxpool"]:
-                x = module(x)
+            if module_def["type"] in ["convolutional", "upsample", "maxpool"]:            
+                x = module(x)                
             elif module_def["type"] == "route":
                 combined_outputs = torch.cat([layer_outputs[int(layer_i)] for layer_i in module_def["layers"].split(",")], 1)
                 group_size = combined_outputs.shape[1] // int(module_def.get("groups", 1))
@@ -242,7 +270,47 @@ class Darknet(nn.Module):
             layer_outputs.append(x)
         # return yolo_outputs if self.training else torch.cat(yolo_outputs, 1)        
         return yolo_outputs
+    
+    def forward_backbone(self, x):
+        img_size = x.size(2)
+        layer_outputs = []
+        
+        intermediate_features = []
+        
+        for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
+            if module_def["type"] in ["convolutional", "upsample", "maxpool"]:            
+                if (
+                    module_def["type"] == "convolutional"
+                    and i + 1 < len(self.module_defs)
+                    and self.module_defs[i + 1]["type"] == "yolo"
+                ):
+                    intermediate_features.append(x)
+                
+                x = module(x)                                
+            elif module_def["type"] == "route":
+                combined_outputs = torch.cat([layer_outputs[int(layer_i)] for layer_i in module_def["layers"].split(",")], 1)
+                group_size = combined_outputs.shape[1] // int(module_def.get("groups", 1))
+                group_id = int(module_def.get("group_id", 0))
+                x = combined_outputs[:, group_size * group_id : group_size * (group_id + 1)] # Slice groupings used by yolo v4
+            elif module_def["type"] == "shortcut":
+                layer_i = int(module_def["from"])
+                x = layer_outputs[-1] + layer_outputs[layer_i]
 
+            layer_outputs.append(x)
+    
+        return intermediate_features
+    
+    def forward_detection_head(self, grid_features:Iterable[torch.tensor], image_size:int):
+        
+        assert len(grid_features) == len(self.detection_head_indices)
+        
+        for idx, (prev_conv_idx, det_head_idx) in enumerate(self.detection_head_indices):
+            
+            grid_features[idx] = self.module_list[prev_conv_idx](grid_features[idx])
+            grid_features[idx] = self.module_list[det_head_idx][0](grid_features[idx], image_size)
+            
+        return grid_features            
+    
     def load_darknet_weights(self, weights_path):
         """Parses and loads the weights stored in 'weights_path'"""
 
@@ -366,4 +434,27 @@ class Darknet(nn.Module):
 
         fp.close()
 
-
+    def get_backbone_trainable_params(self, requires_grad:bool):
+        
+        indices = [idx for tup in self.detection_head_indices for idx in tup]
+        backbone_params = []
+        
+        for i, module in enumerate(self.module_list):
+            if i not in indices:
+                for name, p in module.named_parameters():
+                    backbone_params.append(p)
+                    p.requires_grad = requires_grad
+                    
+        return backbone_params
+        
+    def get_detection_head_params(self, requires_grad:bool):
+        
+        detection_head_params = []
+        
+        for idx_pair in self.detection_head_indices:
+            for module_idx in idx_pair:
+                for p in self.module_list[module_idx].parameters():
+                    p.requires_grad = requires_grad
+                    detection_head_params.append(p)    
+                    
+        return detection_head_params       
