@@ -104,7 +104,7 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False):
             tobj[b, anchor, grid_j, grid_i] = iou.detach().clamp(0).type(tobj.dtype)  # Use cells with iou > 0 as object targets
 
             # Classification of the class
-            # Check if we need to do a classification (number of classes > 1)
+            # Check if we need to do a classification (number of classes > 1)                        
             if ps.size(1) - 5 > 1:
                 # Hot one class encoding
                 t = torch.zeros_like(ps[:, 5:], device=device)  # targets
@@ -139,6 +139,7 @@ def build_targets(p, targets, model):
     # Make a tensor that iterates 0-2 for 3 anchors and repeat that as many times as we have target boxes
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)
     # Copy target boxes anchor size times and append an anchor index to each copy the anchor index is also expressed by the new first dimension
+    
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)
     
     for i, yolo_layer in enumerate(model.yolo_layers):

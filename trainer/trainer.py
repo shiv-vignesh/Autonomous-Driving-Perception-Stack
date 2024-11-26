@@ -8,7 +8,7 @@ from terminaltables import AsciiTable
 from .logger import Logger
 from model.yolo import Darknet
 from model.yolo_utils import xywh2xyxy, non_max_suppression, get_batch_statistics, ap_per_class
-from dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
+from CSCI739.dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
 from dataset_utils.enums import Enums
 from trainer.loss import compute_loss
 
@@ -53,6 +53,7 @@ class Trainer:
         '''   
         
         self.model.to(self.device)
+        self.batch_size = self.model.hyperparams['batch']//self.model.hyperparams['subdivisions']              
         
         self._init_dataloader(dataset_kwargs)
         
@@ -66,6 +67,7 @@ class Trainer:
         self.logger.log_message(f'Right Image Dir: {self.train_dataloader.dataset.right_image_dir}')
         self.logger.log_message(f'Labels Dir: {self.train_dataloader.dataset.labels_dir}')
         self.logger.log_message(f'Train Batch Size: {self.train_dataloader.batch_size}')
+        self.logger.log_message(f'Train Apply Augmentation: {self.train_dataloader.collate_fn.apply_augmentation}')
         
         self.logger.log_line()
         
@@ -79,6 +81,7 @@ class Trainer:
         self.logger.log_message(f'Right Image Dir: {self.validation_dataloader.dataset.right_image_dir}')
         self.logger.log_message(f'Labels Dir: {self.validation_dataloader.dataset.labels_dir}')
         self.logger.log_message(f'Train Batch Size: {self.validation_dataloader.batch_size}')
+        self.logger.log_message(f'Validation Apply Augmentation: {self.validation_dataloader.collate_fn.apply_augmentation}')
         
         self.logger.log_line()        
         
@@ -95,7 +98,7 @@ class Trainer:
         
         self.logger.log_line()
         self.logger.log_message(f'Device: {self.device} and Device Count: {self.device_count}')
-        self.logger.log_new_line()                
+        self.logger.log_new_line()  
         
     def _init_dataloader(self, dataset_kwargs:dict):        
         def create_dataloader(kwargs:dict, image_resize:tuple):
@@ -109,9 +112,10 @@ class Trainer:
             dataloader = DataLoader(
                 dataset, 
                 # batch_size=kwargs['batch_size'],
-                batch_size=self.model.hyperparams['batch']//self.model.hyperparams['subdivisions'],
+                batch_size=self.batch_size,
                 collate_fn=KittiLidarFusionCollateFn(
                     image_resize=image_resize,
+                    apply_augmentation=kwargs["apply_augmentation"]
                 ),
                 shuffle=kwargs['shuffle']
             )            
@@ -176,6 +180,9 @@ class Trainer:
         self.total_training_time = 0.0
         
         self.cur_epoch = 0        
+        
+        # self.valid_one_epoch()
+        # exit(1)
                 
         for epoch in range(self.epochs):
             self.cur_epoch = epoch
@@ -218,7 +225,9 @@ class Trainer:
         epoch_training_time = 0.0
         ten_percent_training_time = 0.0        
         
-        for batch_idx, data_items in enumerate(self.train_dataloader):
+        train_iter = tqdm(self.train_dataloader)
+        
+        for batch_idx, data_items in enumerate(train_iter):
             for k,v in data_items.items():
                 if torch.is_tensor(v):                    
                     data_items[k] = v.to(self.device)
@@ -349,8 +358,8 @@ class Trainer:
                 # in-place operation on outputs (Reshaping)
                 reshaped_outputs = reshape_outputs(outputs)
                 loss, loss_components = compute_loss(reshaped_outputs, data_items['targets'], self.model, eval_debug=True)
-                total_eval_loss += loss.item()                
-                
+                total_eval_loss += loss.item()
+                                
                 del reshaped_outputs
                                             
                 anchor_grids = [yolo_layer.anchor_grid for yolo_layer in self.model.yolo_layers]            
