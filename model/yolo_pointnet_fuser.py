@@ -4,7 +4,7 @@ import math
 import numpy as np
 import torch 
 
-from .point_net import PointNetBackbone
+# from .point_net import PointNetBackbone
 from .t_net import TransformNet
 from .yolo import Darknet
 
@@ -147,7 +147,7 @@ class AdaptiveFusion(torch.nn.Module):
             return yolo_grid_features * attn_grid_map 
 
 class FuserPipeline(torch.nn.Module):
-    def __init__(self, yolo:Darknet, pointnet:PointNetBackbone, 
+    def __init__(self, yolo:Darknet, pointnet:TransformNet, 
                  yolo_device:torch.device, point_net_device:torch.device, 
                  adaptive_fusion_kwargs:dict):
         super(FuserPipeline, self).__init__()
