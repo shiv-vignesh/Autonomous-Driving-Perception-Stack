@@ -2,16 +2,20 @@
     "dataset_kwargs":{
         "trainer_dataset_kwargs":{
             "lidar_dir":"data/velodyne/training/velodyne",
+            "precomputed_voxel_dir":"",
+            "precomputed_proj2d_dir":"",
             "calibration_dir":"data/calibration/training/calib",
             "left_image_dir":"data/left_images/training/image_2",
             "right_image_dir":null,
             "labels_dir":"data/labels/training/label_2",
             "train_batch_size":1,
             "shuffle":true,
-            "apply_augmentation":true
+            "apply_augmentation":false
         },
         "validation_dataset_kwargs":{
             "lidar_dir":"data/velodyne/validation/velodyne",
+            "precomputed_voxel_dir":"",
+            "precomputed_proj2d_dir":"",            
             "calibration_dir":"data/calibration/validation/calib",
             "left_image_dir":"data/left_images/validation/image_2",
             "right_image_dir":null,
@@ -23,14 +27,33 @@
         "image_resize":[416, 416], 
         "perform_validation":false
     },
+    "pointnet_kwargs":{
+        "num_points":50000,
+        "num_global_feats":1024
+    },
+    "adaptive_fusion_kwargs":{
+        "transform_image_features":false, 
+        "fusion_type":"residual",
+        "alpha":0.5
+    },
     "optimizer_kwargs":{
         "_description": "default_lr is for any layer other than lm",
-        "type": "AdamW"
+        "type": "AdamW",
+        "train_yolo_backbone":true, 
+        "train_yolo_detection":true, 
+        "train_pointnet":true,
+        "train_fusion_layers":true,        
+        "pointnet_lr":0.001,
+        "pointnet_momentum":0.9,
+        "pointnet_decay":0.0005,
+        "fusion_lr":0.005,
+        "fusion_momentum":0.9,
+        "fusion_decay":0.005     
     },
     "lr_scheduler_kwargs":{
     },
     "trainer_kwargs":{
-        "output_dir": "pretrained_darknet53_rgb_Lidar_(num_classes=3)",
+        "output_dir": "ImprovedAdaptiveFusion_additive_(num-classes=3)_debug",
         "is_training":true,
         "first_val_epoch": 0,
         "metric_eval_mode": "strict",
@@ -39,9 +62,10 @@
         "monitor_train": true,
         "monitor_val": true,
         "gradient_clipping": 1.0,
-        "device": "cuda:2", 
+        "yolo_device_id": "cuda:4", 
+        "pointnet_device_id": "cuda:5", 
         "checkpoint_idx":10
     },
     "callback_kwargs":{
     }
-}
+}    
