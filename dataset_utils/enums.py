@@ -6,24 +6,19 @@ class Enums:
         'Truck': 'Car',
         'Pedestrian': 'Pedestrian',
         'Person_sitting': 'Pedestrian',
-        'Cyclist': 'Cyclist',
-        'Tram': 'DontCare',
-        'Misc': 'DontCare',
-        'DontCare': 'DontCare'
+        'Cyclist': 'Cyclist'
     }
     
     KiTTi_label2Id = {
         'Car': 0,
         'Cyclist': 1,
-        'DontCare': 2,
-        'Pedestrian': 3
+        'Pedestrian': 2
     }
 
     KiTTi_Id2label = {
         0: 'Car',
         1: 'Cyclist',
-        2: 'DontCare',
-        3: 'Pedestrian'
+        2: 'Pedestrian',
     }
 
     reduced_KiTTi_label2Id = {
