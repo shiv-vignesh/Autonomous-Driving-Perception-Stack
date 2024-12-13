@@ -188,3 +188,34 @@ def build_targets(p, targets, model):
         tcls.append(c)
 
     return tcls, tbox, indices, anch
+
+def feature_alignment_loss(yolo_feat:torch.tensor, lidar_feat:torch.tensor):
+    def compute_statistics(features):
+        # Compute channel-wise mean and covariance
+        mean = torch.mean(features, dim=[2, 3])  # (B, C)
+        feat_flat = features.view(features.size(0), features.size(1), -1)  # (B, C, H*W)
+        cov = torch.bmm(feat_flat, feat_flat.transpose(1, 2)) / feat_flat.size(2)  # (B, C, C)
+        return mean, cov
+    
+    yolo_mean, yolo_cov = compute_statistics(yolo_feat)
+    lidar_mean, lidar_cov = compute_statistics(lidar_feat)
+    
+    mean_loss = torch.nn.functional.mse_loss(yolo_mean, lidar_mean)
+    cov_loss = torch.norm(yolo_cov - lidar_cov, p='fro') / yolo_cov.size(0)
+    
+    # 2. Local Structure Preservation
+    def compute_local_structure(features):
+        # Compute pairwise distances in feature space
+        feat_flat = features.view(features.size(0), features.size(1), -1)  # (B, C, H*W)
+        feat_norm = torch.norm(feat_flat, p=2, dim=1, keepdim=True)  # (B, 1, H*W)
+        feat_normalized = feat_flat / (feat_norm + 1e-7)  # (B, C, H*W)
+        similarity_matrix = torch.bmm(feat_normalized.transpose(1, 2), 
+                                    feat_normalized)  # (B, H*W, H*W)
+        return similarity_matrix
+    
+    yolo_structure = compute_local_structure(yolo_feat)
+    point_structure = compute_local_structure(lidar_feat)
+    
+    structure_loss = torch.nn.functional.mse_loss(yolo_structure, point_structure)
+    
+    return mean_loss + 0.1 * cov_loss + 0.1 * structure_loss  
