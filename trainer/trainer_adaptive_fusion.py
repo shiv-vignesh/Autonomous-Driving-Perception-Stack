@@ -1,18 +1,150 @@
+import torch.utils
 from tqdm import tqdm
 import torch, time
-import os, math
+import os, math, random, cv2
 import numpy as np
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from terminaltables import AsciiTable
+from scipy.interpolate import griddata
 
 from .logger import Logger
 from model.yolo_pointnet_fuser import FuserPipeline
 from model.yolo_utils import xywh2xyxy, non_max_suppression, get_batch_statistics, ap_per_class
-from CSCI739.dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
+from dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
 from dataset_utils.enums import Enums
-from trainer.loss import compute_loss
+from trainer.loss import compute_loss, feature_alignment_loss
 
 from .trainer import Trainer
+
+class AugmentImage:
+    
+    def __init__(self, fog_intensity=0.65, salt_prob=0.1, pepper_prob=0.1, pixel_size:int=8):
+        """
+        Atmospheric fog augmentation class using depth and reflectance maps.
+        :param beta_range: Range of fog density (scattering coefficient).
+        :param airlight_intensity: Range for airlight brightness (fog background light).
+        """
+
+        self.fog_intensity = fog_intensity
+        self.alpha = 1 - self.fog_intensity
+        self.beta = self.fog_intensity 
+        self.gamma = 0.0
+        
+        self.salt_prob = salt_prob
+        self.pepper_prob = pepper_prob
+        self.pixel_size = pixel_size
+                
+    def apply_haze(self, images:torch.tensor):
+        
+        orig_range = (images.min(), images.max())
+        if orig_range[1] > 1:  # Assume range is [0, 255]
+            images = images / 255.0                
+            
+        depth_map = images[:, -2, :, :] # RGB + depth + reflectance
+        reflectance = images[:, -1, :, :]
+        rgb = images[:, :3, :, :]
+                
+        haze_layer = torch.ones_like(rgb, device=rgb.device, dtype=rgb.dtype) * self.fog_intensity
+        foggy_images = rgb * self.alpha + (1-haze_layer)*self.beta + self.gamma
+
+        if orig_range[1] > 1:
+            foggy_images = (foggy_images * 255).to(torch.float)  
+
+        # foggy_images = foggy_images.detach().cpu().numpy()
+        # for idx, foggy_image in enumerate(foggy_images):
+        #     foggy_image = np.transpose(foggy_image, (1, 2, 0))
+        #     cv2.imwrite(f'{idx}_foggy.png', foggy_image)        
+        
+        # exit(1)
+
+        foggy_images = torch.concat([foggy_images, depth_map.unsqueeze(1), reflectance.unsqueeze(1)], dim=1)
+                              
+        return foggy_images
+    
+    def apply_salt_pepper(self, images:torch.tensor):
+
+        orig_range = (images.min(), images.max())
+        if orig_range[1] > 1:  # Assume range is [0, 255]
+            images = images / 255.0                
+            
+        depth_map = images[:, -2, :, :] # RGB + depth + reflectance
+        reflectance = images[:, -1, :, :]
+        rgb = images[:, :3, :, :]
+
+        # Create a tensor for salt noise
+        salt_mask = (torch.rand_like(rgb) < self.salt_prob).float()
+
+        # Create a tensor for pepper noise
+        pepper_mask = (torch.rand_like(rgb) < self.pepper_prob).float()
+
+        # Add salt noise (set pixels to 1)
+        images_with_salt = rgb + salt_mask
+
+        # Add pepper noise (set pixels to 0)
+        images_with_pepper = images_with_salt - pepper_mask
+
+        # Clamp values to ensure they stay within the [0, 1] range
+        noisy_images = torch.clamp(images_with_pepper, 0.0, 1.0)        
+        
+        if orig_range[1] > 1:
+            noisy_images = (noisy_images * 255).to(torch.float)  
+
+        noisy_images_2 = noisy_images.detach().cpu().numpy()
+        for idx, foggy_image in enumerate(noisy_images_2):
+            foggy_image = np.transpose(foggy_image, (1, 2, 0))
+            
+            cv2.imwrite(f'{idx}_saltpepper.png', foggy_image)    
+            
+        noisy_images = torch.concat([noisy_images, depth_map.unsqueeze(1), reflectance.unsqueeze(1)], dim=1)
+            
+        return noisy_images
+    
+    def pixelate(self, images:torch.tensor):
+        
+        orig_range = (images.min(), images.max())
+        if orig_range[1] > 1:  # Assume range is [0, 255]
+            images = images / 255.0                
+            
+        depth_map = images[:, -2, :, :] # RGB + depth + reflectance
+        reflectance = images[:, -1, :, :]
+        rgb = images[:, :3, :, :]        
+
+        batch_size, channels, height, width = rgb.shape
+
+        # Compute the new height and width after downsampling
+        new_height = height // self.pixel_size
+        new_width = width // self.pixel_size
+
+        # Downsample the image to the new size using average pooling
+        rgb_resized = F.avg_pool2d(rgb, kernel_size=self.pixel_size, stride=self.pixel_size)
+
+        # Upscale the image back to the original size using nearest neighbor interpolation
+        pixelated_images = F.interpolate(rgb_resized, size=(height, width), mode='nearest')
+
+        if orig_range[1] > 1:
+            pixelated_images = (pixelated_images * 255).to(torch.float)  
+            
+        pixelated_images_2 = pixelated_images.detach().cpu().numpy()
+        for idx, foggy_image in enumerate(pixelated_images_2):
+            foggy_image = np.transpose(foggy_image, (1, 2, 0))
+            
+            cv2.imwrite(f'{idx}_pixelate.png', foggy_image)                
+            
+        pixelated_images = torch.concat([pixelated_images, depth_map.unsqueeze(1), reflectance.unsqueeze(1)], dim=1)
+
+        return pixelated_images        
+    
+    def __call__(self, images:torch.tensor, augmentation:str):
+        
+        if 'transmittance' == augmentation:
+            return self.apply_haze(images)
+
+        elif 'SaltPapperNoise' == augmentation:
+            return self.apply_salt_pepper(images)  
+        
+        elif 'pixelate' == augmentation:
+            return self.pixelate(images)            
 
 class AdaptiveFusionTrainer(Trainer):    
     def __init__(self, fuser_pipeline:FuserPipeline, 
@@ -32,6 +164,10 @@ class AdaptiveFusionTrainer(Trainer):
         self.gradient_clipping = trainer_kwargs["gradient_clipping"]
         
         self.checkpoint_idx = trainer_kwargs['checkpoint_idx']     
+        self.robustness_augmentations = trainer_kwargs['robustness_augmentations']
+        self.gradient_accumulation_steps = trainer_kwargs['gradient_accumulation_steps']
+        self.compute_feature_alignment = trainer_kwargs['compute_feature_alignment']
+        self.yolo_lr_burn_in = trainer_kwargs['yolo_lr_burn_in']
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)                
@@ -71,23 +207,40 @@ class AdaptiveFusionTrainer(Trainer):
         self.logger.log_message(f'Train Batch Size: {self.validation_dataloader.batch_size} - Ten Percent Train Log {self.ten_percent_train_batch}')
         self.logger.log_message(f'Validation Apply Augmentation: {self.validation_dataloader.collate_fn.apply_augmentation}')
         
+        self.logger.log_new_line()        
+        
+        if self.robustness_augmentations:
+            self.logger.log_message(f'Robustness Augmentations: {self.robustness_augmentations}')
+            self.robust_augmentor = AugmentImage()
+        
         self.logger.log_line()        
         
         self._init_optimizer(
             optimizer_kwargs
         )
-                
-        self.logger.log_line()
-        self.logger.log_message(f'Optimizer: {self.optimizer.__class__.__name__}')
-
-        for i, group in enumerate(self.optimizer.param_groups):
-            self.logger.log_message(f"Group {group['name']}:")
-            self.logger.log_message(f"  Learning Rate: {group['lr']}")
-            self.logger.log_message(f"  Weight Decay: {group['weight_decay']}")
-            self.logger.log_message(f"  Number of Parameters: {len(group['params'])}")  
-            self.logger.log_new_line()    
         
-        self.logger.log_new_line()        
+        self._init_lr_scheduler(lr_scheduler_kwargs)
+                
+        if self.yolo_optimizer is not None:            
+            self.logger.log_message(f"Group {self.fuser_pipeline.yolo._get_name()}: {self.yolo_optimizer.__class__.__name__}")
+            self.logger.log_message(f"  Learning Rate: {self.yolo_optimizer.param_groups[0]['lr']}")
+            self.logger.log_message(f"  Weight Decay: {self.yolo_optimizer.param_groups[0]['weight_decay']}")
+            self.logger.log_message(f"  Number of Parameters: {sum([len(param['params']) for param in self.yolo_optimizer.param_groups])}")  
+            self.logger.log_new_line()    
+                    
+        if self.pointnet_optimizer is not None:
+            self.logger.log_message(f"Group {self.fuser_pipeline.pointnet._get_name()}: {self.pointnet_optimizer.__class__.__name__}")
+            self.logger.log_message(f"  Learning Rate: {self.pointnet_optimizer.param_groups[0]['lr']}")
+            self.logger.log_message(f"  Weight Decay: {self.pointnet_optimizer.param_groups[0]['weight_decay']}")
+            self.logger.log_message(f"  Number of Parameters: {sum([len(param['params']) for param in self.pointnet_optimizer.param_groups])}")  
+            self.logger.log_new_line()                          
+            
+        if self.fusion_optimizer is not None:
+            self.logger.log_message(f"Group {self.fuser_pipeline.fusion_gates._get_name()}: {self.fusion_optimizer.__class__.__name__}")
+            self.logger.log_message(f"  Learning Rate: {self.fusion_optimizer.param_groups[0]['lr']}")
+            self.logger.log_message(f"  Weight Decay: {self.fusion_optimizer.param_groups[0]['weight_decay']}")
+            self.logger.log_message(f"  Number of Parameters: {sum([len(param['params']) for param in self.fusion_optimizer.param_groups])}")  
+            self.logger.log_new_line()
         
         if lr_scheduler_kwargs:
             self._init_lr_scheduler(lr_scheduler_kwargs)            
@@ -140,9 +293,68 @@ class AdaptiveFusionTrainer(Trainer):
             )        
         else:
             self.validation_dataloader = None
-                        
-        
+                         
     def _init_optimizer(self, optimizer_kwargs:dict):
+                
+        yolo_params_dict = []
+        
+        if optimizer_kwargs['train_yolo_backbone']:    
+            backbone_params = self.fuser_pipeline.yolo.get_backbone_trainable_params(
+                requires_grad=optimizer_kwargs['train_yolo_backbone'])
+                        
+            yolo_params_dict.append({
+                'params':backbone_params,
+                'lr':self.fuser_pipeline.yolo.hyperparams['learning_rate'],
+                'weight_decay':self.fuser_pipeline.yolo.hyperparams['decay'],
+                'name':'yolo_backbone'
+            })
+
+        if optimizer_kwargs['train_yolo_detection']:    
+            detection_head_params = self.fuser_pipeline.yolo.get_detection_head_params(
+                requires_grad=optimizer_kwargs['train_yolo_detection'])
+                            
+            yolo_params_dict.append({
+                'params':detection_head_params,
+                'lr':self.fuser_pipeline.yolo.hyperparams['learning_rate'],
+                'weight_decay':self.fuser_pipeline.yolo.hyperparams['decay'],
+                'name':'yolo_detection_head'
+            })   
+            
+        if yolo_params_dict:
+            self.yolo_optimizer = torch.optim.Adam(
+                yolo_params_dict, 
+                lr=1e-3, 
+                weight_decay=1e-4
+            )        
+        
+        else:
+            self.yolo_optimizer = None  
+            
+        if optimizer_kwargs['train_pointnet']:
+            pointnet_params = [p for p in self.fuser_pipeline.pointnet.parameters() if p.requires_grad]
+            
+            self.pointnet_optimizer = torch.optim.Adam(
+                params=pointnet_params, 
+                lr=optimizer_kwargs['pointnet_lr'],
+                weight_decay=optimizer_kwargs['pointnet_decay'], 
+            )
+            
+        else:
+            self.pointnet_optimizer = None
+            
+        if optimizer_kwargs['train_fusion_layers']:
+            fusion_params = [p for p in self.fuser_pipeline.fusion_gates.parameters() if p.requires_grad]
+            
+            self.fusion_optimizer = torch.optim.AdamW(
+                params=fusion_params, 
+                lr=optimizer_kwargs['fusion_lr'],
+                weight_decay=optimizer_kwargs['fusion_decay']
+            )
+            
+        else:
+            self.fusion_optimizer = None
+                
+    def _init_optimizer_2(self, optimizer_kwargs:dict):
         
         params_dict = []
 
@@ -159,7 +371,7 @@ class AdaptiveFusionTrainer(Trainer):
                 'weight_decay':self.fuser_pipeline.yolo.hyperparams['decay'],
                 'name':'yolo_backbone'
             })
-                
+                            
         if optimizer_kwargs['train_yolo_detection']:        
             params_dict.append({
                 'params':detection_head_params,
@@ -200,6 +412,30 @@ class AdaptiveFusionTrainer(Trainer):
             )
             self.logger.log_new_line()
             exit(1)                          
+    
+    def _init_lr_scheduler(self, lr_scheduler_kwargs):
+        # return super()._init_lr_scheduler(lr_scheduler_kwargs)
+        
+        if self.yolo_optimizer is not None:            
+            self.yolo_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.yolo_optimizer, T_max=50
+            )            
+        else:
+            self.yolo_lr_scheduler = None
+
+        if self.pointnet_optimizer is not None:            
+            self.pointnet_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.pointnet_optimizer, T_max=50
+            )            
+        else:
+            self.pointnet_lr_scheduler = None
+            
+        if self.fusion_optimizer is not None:            
+            self.fusion_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.fusion_optimizer, T_max=50
+            )                        
+        else:
+            self.fusion_lr_scheduler = None
             
     def train(self):
         
@@ -211,7 +447,8 @@ class AdaptiveFusionTrainer(Trainer):
         
         self.total_training_time = 0.0
         
-        self.cur_epoch = 0        
+        self.cur_epoch = 0   
+        self.best_score = 0.0     
         
         # self.valid_one_epoch()
         # exit(1)
@@ -250,35 +487,48 @@ class AdaptiveFusionTrainer(Trainer):
         for batch_idx, data_items in enumerate(train_iter):
                     
             step_begin_time = time.time()
-            loss, loss_components = self.train_one_step(data_items)       
-            step_end_time = time.time()
-                        
             
-            batches_done = len(self.train_dataloader) * self.cur_epoch + batch_idx   
-            if batches_done % self.fuser_pipeline.yolo.hyperparams['subdivisions'] == 0:
-                # Adapt learning rate
-                # Get learning rate defined in cfg
-                lr = self.fuser_pipeline.yolo.hyperparams['learning_rate']
-                if batches_done < self.fuser_pipeline.yolo.hyperparams['burn_in']:
-                    # Burn in
-                    lr *= (batches_done / self.fuser_pipeline.yolo.hyperparams['burn_in'])
-                else:
-                    # Set and parse the learning rate to the steps defined in the cfg
-                    for threshold, value in self.fuser_pipeline.yolo.hyperparams['lr_steps']:
-                        if batches_done > threshold:
-                            lr *= value
-                # Log the learning rate
-                # self.logger.log_message(f"train/learning_rate, - lr {lr} - batches_done {batches_done}")
-    
-                # Set learning rate
-                for g in self.optimizer.param_groups:
-                    g['lr'] = lr
-
-                # Run optimizer
-                self.optimizer.step()
-                # Reset gradients
-                self.optimizer.zero_grad()                
-                
+            if self.robustness_augmentations:            
+                loss, loss_components = self.train_one_step_augmentation(data_items)       
+            else:
+                loss, loss_components = self.train_one_step(data_items)       
+            step_end_time = time.time()
+            
+            if ((batch_idx + 1) % self.gradient_accumulation_steps == 0) or (batch_idx == self.train_dataloader.__len__() - 1):   
+                     
+                if self.cur_epoch > 20 and self.yolo_lr_burn_in:                
+                    lr = self.fuser_pipeline.yolo.hyperparams['learning_rate']
+                    batches_done = len(self.train_dataloader) * self.cur_epoch + batch_idx   
+                    if batches_done < self.fuser_pipeline.yolo.hyperparams['burn_in']:
+                        # Burn in
+                        lr *= (batches_done / self.fuser_pipeline.yolo.hyperparams['burn_in'])
+                    else:
+                        # Set and parse the learning rate to the steps defined in the cfg
+                        for threshold, value in self.fuser_pipeline.yolo.hyperparams['lr_steps']:
+                            if batches_done > threshold:
+                                lr *= value
+                    # Log the learning rate
+                    # self.logger.log_message(f"train/learning_rate, - lr {lr} - batches_done {batches_done}")
+        
+                    # Set learning rate
+                    for g in self.yolo_optimizer.param_groups:
+                        g['lr'] = lr 
+                        
+                if self.yolo_optimizer is not None:                
+                    self.yolo_optimizer.step()
+                    self.yolo_lr_scheduler.step()
+                    self.yolo_optimizer.zero_grad()  
+                    
+                if self.pointnet_optimizer is not None:                
+                    self.pointnet_optimizer.step()
+                    self.pointnet_lr_scheduler.step()
+                    self.pointnet_optimizer.zero_grad()  
+                    
+                if self.fusion_optimizer is not None:                
+                    self.fusion_optimizer.step()
+                    self.fusion_lr_scheduler.step()
+                    self.fusion_optimizer.zero_grad()                                                                                   
+                                                    
             total_loss += loss.item()
             ten_percent_batch_total_loss += loss.item()
             
@@ -298,11 +548,53 @@ class AdaptiveFusionTrainer(Trainer):
         self.logger.log_message(
             f'Epoch {self.cur_epoch} - Average Loss {total_loss/self.total_train_batch:.4f}'
         )
-                                      
-                    
-    def train_one_step(self, data_items:dict):    
+    
+    def train_one_step_augmentation(self, data_items:dict):
+        
+        pixelated_images = self.robust_augmentor(data_items['images'], 'pixelate')            
+        salt_pepper_images = self.robust_augmentor(data_items['images'], 'SaltPapperNoise')
+        
+        exit(1)
+        
+        with torch.set_grad_enabled(True):
+            outputs, yolo_features_list, lidar_features_list = self.fuser_pipeline(
+                data_items['images'],
+                data_items['raw_point_clouds'],
+                data_items['proj2d_pc_mask'])            
+                        
+            clean_loss, loss_components = compute_loss(outputs, 
+                                                data_items['targets'].to(self.fuser_pipeline.yolo_device), 
+                                                self.fuser_pipeline.yolo)              
+                
+            with torch.autograd.set_detect_anomaly(True):
+                clean_loss.backward()
+            
+            if random.random() > 0.5:
+                data_items['images'] = salt_pepper_images                
+            else:
+                data_items['images'] = pixelated_images                
+            
+            outputs, yolo_features_list, lidar_features_list = self.fuser_pipeline(
+                data_items['images'],
+                data_items['raw_point_clouds'],
+                data_items['proj2d_pc_mask']) 
+            
+            disturbed_loss, _ = compute_loss(outputs, 
+                                            data_items['targets'].to(self.fuser_pipeline.yolo_device), 
+                                            self.fuser_pipeline.yolo)   
+                
+            with torch.autograd.set_detect_anomaly(True):
+                disturbed_loss.backward()                                         
+        
+            if self.gradient_clipping:
+                torch.nn.utils.clip_grad_norm_(self.fuser_pipeline.parameters(), self.gradient_clipping)
+        
+        return clean_loss, loss_components   
+        
+    def train_one_step(self, data_items:dict):   
+
         with torch.set_grad_enabled(True):  
-            outputs = self.fuser_pipeline(
+            outputs, yolo_features_list, lidar_features_list = self.fuser_pipeline(
                 data_items['images'],
                 data_items['raw_point_clouds'],
                 data_items['proj2d_pc_mask'])            
@@ -310,9 +602,23 @@ class AdaptiveFusionTrainer(Trainer):
             loss, loss_components = compute_loss(outputs, 
                                                 data_items['targets'].to(self.fuser_pipeline.yolo_device), 
                                                 self.fuser_pipeline.yolo)                       
-                         
+                                                 
+            if self.compute_feature_alignment:            
+                total_align_loss = torch.zeros(1, device=loss.device)
+                for yolo_feature, lidar_feature in zip(yolo_features_list, lidar_features_list):
+                    align_loss = feature_alignment_loss(yolo_feature.to(loss.device), lidar_feature.to(loss.device))
+                    total_align_loss += align_loss * 0.1            
+                
+                with torch.autograd.set_detect_anomaly(True):
+                    total_align_loss.backward(retain_graph=True)
+                    
+                loss += total_align_loss
+                
             with torch.autograd.set_detect_anomaly(True):
-                loss.backward()
+                loss.backward()           
+                
+            if self.gradient_clipping:
+                torch.nn.utils.clip_grad_norm_(self.fuser_pipeline.parameters(), self.gradient_clipping)                 
 
         return loss, loss_components      
     
@@ -374,7 +680,7 @@ class AdaptiveFusionTrainer(Trainer):
             targets[:, 2:] *= img_size
             
             with torch.no_grad():
-                outputs = self.fuser_pipeline(
+                outputs, yolo_features_list, lidar_features_list = self.fuser_pipeline(
                     data_items['images'],
                     data_items['raw_point_clouds'],
                     data_items['proj2d_pc_mask'])                    
@@ -393,7 +699,7 @@ class AdaptiveFusionTrainer(Trainer):
                 outputs = apply_sigmoid_activation(outputs, data_items['images'].size(2), anchor_grids)                
                 outputs = non_max_suppression(outputs)
             
-            sample_metrics += get_batch_statistics(outputs, targets, iou_threshold=0.45)
+            sample_metrics += get_batch_statistics(outputs, targets, iou_threshold=0.5)
         
         self.logger.log_new_line()
         self.logger.log_message(f'Epoch {self.cur_epoch} - Evaluation Loss {total_eval_loss/len(self.validation_dataloader):.4f}')    
@@ -407,6 +713,21 @@ class AdaptiveFusionTrainer(Trainer):
             true_positives, pred_scores, pred_labels, labels) 
         
         self.print_eval_stats(metrics_output, list(Enums.KiTTi_label2Id.keys()), True)
+        
+        _, _, AP, _, _ = metrics_output
+        
+        if AP.mean() > (self.best_score + 0.02):
+            self.best_score = AP.mean()
+            ckpt_dir = f'{self.output_dir}/best-model'
+            if not os.path.exists(ckpt_dir):
+                os.makedirs(ckpt_dir)
+            
+            self.fuser_pipeline.save_model_ckpts(
+                ckpt_dir, self.cur_epoch
+            )            
+            
+            self.logger.log_message(f'Saving Best Model at Performance - AP: {self.best_score}')
+            self.logger.log_line()
         
     def print_eval_stats(self, metrics_output, class_names, verbose):
         if metrics_output is not None:
