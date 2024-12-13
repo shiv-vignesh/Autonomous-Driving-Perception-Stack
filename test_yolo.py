@@ -94,6 +94,7 @@ def draw_and_save_output_images(image_detections:list,
     
     for (image_path, detections) in zip(image_paths, image_detections):
         image_arr = cv2.imread(image_path)
+        image_arr = image_arr[:, :, ::-1]
         
         plt.figure()
         fig, ax = plt.subplots(1)
@@ -170,9 +171,8 @@ def test(config_path:str, ckpt_path:str, test_dataset_kwargs:dict, output_dir:st
                 
         with torch.no_grad():
             outputs = model(data_items['images'])        
-            
             anchor_grids = [yolo_layer.anchor_grid for yolo_layer in model.yolo_layers]            
-            outputs = reshape_outputs(outputs)
+            outputs = reshape_outputs(outputs)            
             outputs = apply_sigmoid_activation(outputs, data_items['images'].size(2), anchor_grids)                
             outputs = non_max_suppression(outputs)       
             
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     
     test_kwargs = {
         "config_path":"config/yolov3-KiTTi.cfg",
-        "ckpt_path":"devDataTraining_normal_rgb/yolo_weights_59.pth",
+        "ckpt_path":"training_logs/pretrained_darknet53_rgb_Lidar/yolo_weights_59.pth",
         "test_dataset_kwargs":{
             "lidar_dir":"data/velodyne/validation/velodyne",
             "calibration_dir":"data/calibration/validation/calib",
@@ -236,7 +236,7 @@ if __name__ == "__main__":
             "shuffle":False, 
             "image_resize":[416, 416]
         },
-        "output_dir":"devDataTraining_normal_rgb/detections"
+        "output_dir":"pretrained_darknet53_rgb_Lidar/detections"
     }
     
     test(**test_kwargs)
