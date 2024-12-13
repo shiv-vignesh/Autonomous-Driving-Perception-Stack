@@ -30,7 +30,6 @@ def test_fuser_pipeline(fuser_pipeline:FuserPipeline, dataloader:torch.utils.dat
             break
         
 def prepare_device_ids(trainer_kwargs:dict):
-    print(trainer_kwargs)
     yolo_device = torch.device(trainer_kwargs['yolo_device_id']) if torch.cuda.is_available() else torch.device("cpu")        
     pointnet_device = torch.device(trainer_kwargs['pointnet_device_id']) if torch.cuda.is_available() else torch.device("cpu")            
     
@@ -69,10 +68,15 @@ if __name__ == "__main__":
     trainer_config = json.load(open('config/yolo_pointnet_fusion_trainer.json'))
     darknet53_path = ''
     
-    yolo_weights_pth_path = "training_logs/pretrained_darknet53_rgb_Lidar/yolo_weights_59.pth"
-    pointnet_weights_pth_path = '/home/sk4858/CSCI739/model_weights/best_model.pth'
-    
-    yolo_cfg_path = 'config/yolov3-yolo_reduced_classes.cfg'
+    # yolo_weights_pth_path = "training_logs/pretrained_darknet53_rgb_Lidar/yolo_weights_59.pth"
+    # pointnet_weights_pth_path = '/home/sk4858/CSCI739/model_weights/best_model.pth'
+        
+    yolo_weights_pth_path = ""
+    pointnet_weights_pth_path = ''
+        
+    yolo_cfg_path = 'config/yolov3-yolo_reduced_classes.cfg'    
+    spatial_fusion_ckpt_dir = 'Spatial-Fusion-Pipeline/best-model'
+    spatial_fusion_ckpt = 24
     
     yolo_device, pointnet_device = prepare_device_ids(trainer_config['trainer_kwargs'])
     
@@ -91,6 +95,9 @@ if __name__ == "__main__":
     point_net.to(pointnet_device)
     
     fuser_pipeline = create_fuser_pipeline(yolo, point_net, yolo_device, pointnet_device, trainer_config['adaptive_fusion_kwargs'])
+    
+    if os.path.exists(spatial_fusion_ckpt_dir):
+        fuser_pipeline.load_model_ckpts(spatial_fusion_ckpt_dir, spatial_fusion_ckpt)
     
     trainer = AdaptiveFusionTrainer(
         fuser_pipeline,  
