@@ -8,7 +8,6 @@
             "left_image_dir":"data/left_images/training/image_2",
             "right_image_dir":null,
             "labels_dir":"data/labels/training/label_2",
-            "train_batch_size":1,
             "shuffle":true,
             "apply_augmentation":false
         },
@@ -20,21 +19,20 @@
             "left_image_dir":"data/left_images/validation/image_2",
             "right_image_dir":null,
             "labels_dir":"data/labels/validation/label_2",
-            "train_batch_size":1,
-            "shuffle":true,
+            "shuffle":false,
             "apply_augmentation":false            
         }, 
         "image_resize":[416, 416], 
         "perform_validation":false
     },
     "pointnet_kwargs":{
-        "num_points":50000,
+        "num_points":75000,
         "num_global_feats":1024
     },
     "adaptive_fusion_kwargs":{
         "transform_image_features":false, 
         "fusion_type":"residual",
-        "alpha":0.5
+        "alpha":1.0
     },
     "optimizer_kwargs":{
         "_description": "default_lr is for any layer other than lm",
@@ -43,17 +41,17 @@
         "train_yolo_detection":true, 
         "train_pointnet":true,
         "train_fusion_layers":true,        
-        "pointnet_lr":0.001,
+        "pointnet_lr":3e-5,
         "pointnet_momentum":0.9,
-        "pointnet_decay":0.0005,
-        "fusion_lr":0.005,
+        "pointnet_decay":1e-4,
+        "fusion_lr":5e-3,
         "fusion_momentum":0.9,
-        "fusion_decay":0.005     
+        "fusion_decay":1e-4     
     },
     "lr_scheduler_kwargs":{
     },
     "trainer_kwargs":{
-        "output_dir": "ImprovedAdaptiveFusion_additive_(num-classes=3)_debug",
+        "output_dir": "Robust-Spatial-Fusion-Pipeline-3",
         "is_training":true,
         "first_val_epoch": 0,
         "metric_eval_mode": "strict",
@@ -62,9 +60,13 @@
         "monitor_train": true,
         "monitor_val": true,
         "gradient_clipping": 1.0,
-        "yolo_device_id": "cuda:4", 
-        "pointnet_device_id": "cuda:5", 
-        "checkpoint_idx":10
+        "yolo_device_id": "cuda:0", 
+        "pointnet_device_id": "cuda:1", 
+        "checkpoint_idx":10,
+        "gradient_accumulation_steps":4,
+        "compute_feature_alignment":false,
+        "yolo_lr_burn_in":true,
+        "robustness_augmentations":["SaltPapperNoise", "pixelate"]
     },
     "callback_kwargs":{
     }
