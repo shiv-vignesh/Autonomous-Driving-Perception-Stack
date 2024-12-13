@@ -8,7 +8,7 @@ from terminaltables import AsciiTable
 from .logger import Logger
 from model.yolo import Darknet
 from model.yolo_utils import xywh2xyxy, non_max_suppression, get_batch_statistics, ap_per_class
-from CSCI739.dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
+from dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
 from dataset_utils.enums import Enums
 from trainer.loss import compute_loss
 
@@ -145,8 +145,10 @@ class Trainer:
         if optimizer_kwargs['type'] == "AdamW":
             self.optimizer = torch.optim.Adam(
                 params,
-                lr=self.model.hyperparams['learning_rate'],
-                weight_decay=self.model.hyperparams['decay']
+                # lr=self.model.hyperparams['learning_rate'],
+                # weight_decay=self.model.hyperparams['decay']
+                lr=1e-3, 
+                
             )
             
         elif optimizer_kwargs['type'] == "SGD":
@@ -165,9 +167,7 @@ class Trainer:
             exit(1)
             
     def _init_lr_scheduler(self, lr_scheduler_kwargs:dict):        
-        self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 
-                                                            step_size=lr_scheduler_kwargs['step_size'], 
-                                                            gamma=lr_scheduler_kwargs['gamma'])
+        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 10)
         
     def train(self):
         
