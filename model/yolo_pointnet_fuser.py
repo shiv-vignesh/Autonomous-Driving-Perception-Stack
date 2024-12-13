@@ -52,14 +52,17 @@ class ImprovedAdaptiveFusion(torch.nn.Module):
             torch.nn.init.kaiming_normal_(m.weight.data)
             if m.bias is not None:
                 m.bias.data.zero_()
-    
+                          
     def forward(self, yolo_grid_features: torch.Tensor, lidar_grid_features: torch.Tensor):
+        
+        # print(yolo_grid_features.shape)
+        
         bs, c, h, w = yolo_grid_features.shape
         
         # Dimension reduction
         yolo_feat = self.yolo_dim_reduce(yolo_grid_features)
         lidar_feat = self.lidar_dim_reduce(lidar_grid_features)
-        
+                
         # Apply layer norm
         yolo_feat = self.norm1(yolo_feat.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         lidar_feat = self.norm1(lidar_feat.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
@@ -88,9 +91,10 @@ class ImprovedAdaptiveFusion(torch.nn.Module):
         fusion_features = self.norm2(fusion_features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         
         if self.fusion_type == "residual":
-            return yolo_grid_features + self.alpha * fusion_features
+            return (yolo_grid_features + self.alpha * fusion_features), yolo_feat, lidar_feat
+            # return fusion_features, yolo_feat, lidar_feat
         else:  # multiplicative
-            return yolo_grid_features * torch.sigmoid(fusion_features)
+            return (yolo_grid_features * torch.sigmoid(fusion_features)), yolo_feat, lidar_feat
 
 class AdaptiveFusion(torch.nn.Module):
     def __init__(self, yolo_grid_channels:int, lidar_grid_channels:int,                  
@@ -217,7 +221,7 @@ class FuserPipeline(torch.nn.Module):
             
         return [torch.stack(batch_grid_feature) for batch_grid_feature in batch_lidar_grid_features.values()]
             
-    def forward(self, images:torch.tensor, raw_point_clouds:torch.tensor, proj2d_pc_mask:Iterable[dict]):        
+    def forward(self, images:torch.tensor, raw_point_clouds:torch.tensor, proj2d_pc_mask:Iterable[dict]):                
         
         yolo_backbone_features = self.yolo.forward_backbone(
             images.to(self.yolo_device)
@@ -230,29 +234,29 @@ class FuserPipeline(torch.nn.Module):
             return_global=True
         )
         
+
         lidar_grid_features = self.project_to_grid(point_net_features, proj2d_pc_mask)
         
         del point_net_features
         del raw_point_clouds
         
-        fused_features_list = []
-       
-        # for grid_lidar, grid_yolo in zip(lidar_grid_features, yolo_backbone_features):
-        #     print(grid_lidar.shape, grid_yolo.shape)
-            
-        # exit(1)
+        fused_features_list = []       
+        yolo_features_list, lidar_features_list = [], []
+        
         
         for idx, (_, fusion_module) in enumerate(self.fusion_gates.items()):        
-            fused_features = fusion_module(yolo_backbone_features[idx].to(self.adaptive_fusion_device), 
+            fused_features, yolo_feat, lidar_feat = fusion_module(yolo_backbone_features[idx].to(self.adaptive_fusion_device), 
                                            lidar_grid_features[idx].to(self.adaptive_fusion_device))
+            
+            yolo_features_list.append(yolo_feat)
+            lidar_features_list.append(lidar_feat)
             
             fused_features_list.append(fused_features.to(self.yolo_device))
 
         del lidar_grid_features
         
-        return self.yolo.forward_detection_head(fused_features_list, images.shape[2])
-        
-            
+        return self.yolo.forward_detection_head(fused_features_list, images.shape[2]), yolo_features_list, lidar_features_list
+                  
     def save_model_ckpts(self, output_dir:str, cur_epoch:int):
         
         torch.save(
@@ -265,5 +269,19 @@ class FuserPipeline(torch.nn.Module):
         
         torch.save(
             self.fusion_gates.state_dict(), f'{output_dir}/fusion_gates{cur_epoch}.pth'
-        )                
+        )    
+        
+    def load_model_ckpts(self, output_dir:str, cur_epoch:int):
+        
+        self.yolo.load_state_dict(
+            torch.load(f'{output_dir}/yolo_weights_{cur_epoch}.pth', map_location=self.yolo_device)
+        )
+        
+        self.pointnet.load_state_dict(
+            torch.load(f'{output_dir}/pointnet_{cur_epoch}.pth', map_location=self.point_net_device)
+        )
+        
+        self.fusion_gates.load_state_dict(
+            torch.load(f'{output_dir}/fusion_gates{cur_epoch}.pth', map_location=self.adaptive_fusion_device)
+        )
         
