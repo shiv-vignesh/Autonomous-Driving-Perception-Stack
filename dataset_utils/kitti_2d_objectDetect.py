@@ -165,19 +165,21 @@ class LidarPreprocessorUtils:
 
             # Reshape to grid dimensions
             point_counts = point_counts.view(H_grid, W_grid)  
-            # point_counts[point_counts  == 0] = 1e-5       
+            # point_counts[point_counts  == 0] = 1e-5         
             
-            print(grid_size, (point_counts==0).sum())        
+            # print(f'{grid_size} {point_counts[point_counts == 0].sum()}')   
+            
+            # valid_indices = valid_mask_x & valid_mask_y
+            # print(f'{grid_size} {valid_indices[valid_indices == 0].sum()}')   
             
             valid_lidar_points_dict[grid_size] = {
                 'valid_mask_x':valid_mask_x,
                 'valid_mask_y':valid_mask_y,
-                "valid_indices": valid_mask_x & valid_mask_y,
-                "valid_grid_coords":valid_grid_coords,
+                "valid_indices": valid_mask_x & valid_mask_y, #(N,) bool
+                "valid_grid_coords":valid_grid_coords, #(2, N)
                 "count_grid":point_counts
-            }
+            }            
             
-        exit(1)
 
         return valid_lidar_points_dict    
 
@@ -231,7 +233,8 @@ class KittiLidarFusionCollateFn(object):
     def __init__(self, image_resize:list, original_size:tuple=(1242, 375),
                 precomputed_voxel_dir:str=None, precomputed_proj2d_dir:str=None,
                 transformation=None, clip_distance:float=2.0, apply_augmentation:bool=True,
-                project_2d:bool=False, voxelization:bool=False):        
+                project_2d:bool=False, voxelization:bool=False, 
+                categorize_labels:bool=False):        
         
         self.image_resize = image_resize
         self.transformation = transformation
@@ -240,7 +243,14 @@ class KittiLidarFusionCollateFn(object):
         self.voxelization = voxelization
         self.original_size = original_size
         
+        self.original_width = self.original_size[0]
+        self.original_height = self.original_size[1]
+        
+        self.resized_width = self.image_resize[0]
+        self.resized_height = self.image_resize[1]
+        
         self.voxelization_backend = "open3d"
+        self.categorize_labels = categorize_labels
         
         self.precomputed_voxel_dir = precomputed_voxel_dir if precomputed_voxel_dir is not None else ""
         self.precomputed_proj2d_dir = precomputed_proj2d_dir if precomputed_proj2d_dir is not None else ""
@@ -249,7 +259,14 @@ class KittiLidarFusionCollateFn(object):
         
         if self.transformation is None:
             self.transformation = albumentations.Compose(
-                [albumentations.Resize(height=self.image_resize[0], width=self.image_resize[1], always_apply=True)],
+                # [albumentations.Resize(height=self.image_resize[0], width=self.image_resize[1], always_apply=True)],
+                [albumentations.LongestMaxSize(max_size=max(self.image_resize)),
+                albumentations.PadIfNeeded(
+                    min_height=self.image_resize[0],
+                    min_width=self.image_resize[1],
+                    border_mode=cv2.BORDER_CONSTANT,
+                    value=0
+                )],                
                 bbox_params=albumentations.BboxParams(format='pascal_voc', label_fields=['class_labels'])
             )
             
@@ -288,6 +305,21 @@ class KittiLidarFusionCollateFn(object):
                     
         return calibration_dict
 
+    def categorize_label_difficulty(self, truncation, occlusion):
+        # Easy: Fully visible, truncation <= 15%
+        if occlusion == 0 and truncation <= 0.15:
+            return 0  # Easy
+
+        # Moderate: Partly occluded, truncation <= 30%
+        elif occlusion <= 1 and truncation <= 0.30:
+            return 1  # Moderate
+
+        # Hard: Difficult to see, truncation <= 50%
+        elif occlusion <= 2 and truncation <= 0.50:
+            return 2  # Hard
+        
+        return 2        
+    
     def read_label_file(self, label_file_path:str):
         '''
         #Values    Index    Name      Description
@@ -312,6 +344,7 @@ class KittiLidarFusionCollateFn(object):
         '''
         class_labels = []
         bboxes = []
+        categories = []
         
         with open(label_file_path, 'r') as file:
             for line in file:                
@@ -320,7 +353,7 @@ class KittiLidarFusionCollateFn(object):
                 # Extract class label and bounding box coordinates
                 obj_type = parts[0]  # First element is the object type
                 
-                if Enums.mapping_dict:
+                if Enums.mapping_dict and obj_type in Enums.mapping_dict:
                     obj_type = Enums.mapping_dict[obj_type]
                 
                 elif obj_type not in Enums.KiTTi_label2Id:
@@ -336,8 +369,20 @@ class KittiLidarFusionCollateFn(object):
                 
                 class_labels.append(class_id)
                 bboxes.append([left, top, right, bottom])  
+
+                if self.categorize_labels:
+                    difficulty = self.categorize_label_difficulty(
+                        float(parts[1]), int(parts[2])
+                    )
+                    
+                    # categories[difficulty] = (class_id, [left, top, right, bottom])
+                    categories.append(difficulty)               
+        if self.categorize_labels:
+            return class_labels, bboxes, categories
+        else:
+            return class_labels, bboxes                     
                 
-        return class_labels, bboxes         
+        # return class_labels, bboxes         
 
     def transform_sample(self, image:np.array, label_bboxes:np.array=None, class_labels:np.array=None):                        
         
@@ -353,12 +398,12 @@ class KittiLidarFusionCollateFn(object):
         
         return transformed_dict
     
-    def prepare_targets(self, batch_idx:int, class_labels:list, class_bboxes:list):
+    def prepare_targets(self, batch_idx:int, class_labels:list, class_bboxes:list, letter_box:bool=True):
 
         targets = []
         for bbox, class_id in zip(class_bboxes, class_labels):        
             left, top, right, bottom = bbox
-
+                             
             x_center = (left + right) / 2 / self.image_resize[1]
             y_center = (top + bottom) / 2 / self.image_resize[0]
             width = (right - left) / self.image_resize[1]
@@ -506,9 +551,9 @@ class KittiLidarFusionCollateFn(object):
                 projected_voxel_2d[:, 0] = (projected_voxel_2d[:, 0]/ self.original_size[0]) * (self.image_resize[0])
                 projected_voxel_2d[:, 1] = (projected_voxel_2d[:, 1]/ self.original_size[1]) * (self.image_resize[1])                            
                                 
-                # depth[negative_depth_mask] = 1e-5
-                # projected_voxel_2d[:, 0] /= depth
-                # projected_voxel_2d[:, 1] /= depth
+                depth[negative_depth_mask] = 1e-5
+                projected_voxel_2d[:, 0] /= depth
+                projected_voxel_2d[:, 1] /= depth
                 
                 projected_voxel_2d = torch.from_numpy(projected_voxel_2d)
                 valid_lidar_points_dict = LidarPreprocessorUtils().obtain_valid_lidar_points(
@@ -524,7 +569,8 @@ class KittiLidarFusionCollateFn(object):
             "targets": [],
             "image_paths":[],
             "raw_point_clouds":[],
-            "proj2d_pc_mask":[] 
+            "proj2d_pc_mask":[], 
+            'target_difficulty':[]
             # "bboxes":[], # list of list of list [bs * [num_labels * [x,y,x,y] ]] (inner list of 4 elements)
             # "class_labels":[] # list of list of class_labels [bs * [num_labels] ] (inner list is class_ids)
         }        
@@ -570,7 +616,18 @@ class KittiLidarFusionCollateFn(object):
                 
                 if label_file_path is not None:
                     if os.path.exists(label_file_path):
-                        class_labels, label_bboxes = self.read_label_file(label_file_path) 
+                        # class_labels, label_bboxes = self.read_label_file(label_file_path)
+
+                        if self.categorize_labels:
+                            class_labels, label_bboxes, target_difficulty = self.read_label_file(label_file_path) 
+
+                            batch_data_items['target_difficulty'].append(
+                                torch.tensor(target_difficulty, dtype=torch.uint8)
+                            )
+                            
+                        else:
+                            class_labels, label_bboxes = self.read_label_file(label_file_path)
+                         
                         transformed_dict = self.transform_sample(
                             combined_image, label_bboxes, class_labels
                         )      
@@ -582,6 +639,7 @@ class KittiLidarFusionCollateFn(object):
                         batch_data_items['targets'].append(
                             torch.tensor(targets, dtype=torch.float32)
                         )
+                        
                     else:
                         print(f'Label File Path not found!!')
                         exit(1)                    
@@ -591,7 +649,7 @@ class KittiLidarFusionCollateFn(object):
                         combined_image
                     )                                                
 
-                image_tensor = torch.from_numpy(transformed_dict['image']).permute((2, 0, 1))            
+                image_tensor = torch.from_numpy(transformed_dict['image']).permute((2, 0, 1))                          
                 batch_data_items['images'].append(image_tensor)
                 batch_data_items['proj2d_pc_mask'].append(valid_lidar_points_dict) 
                 batch_data_items['raw_point_clouds'].append(voxelized_point_cloud)                
@@ -616,6 +674,11 @@ class KittiLidarFusionCollateFn(object):
             batch_data_items['targets'] = torch.concat(
                 batch_data_items['targets'], dim=0
             )
+            
+        if batch_data_items['target_difficulty']:
+            batch_data_items['target_difficulty'] = torch.concat(
+                batch_data_items['target_difficulty'], dim=0
+            )            
             
         return batch_data_items
         
