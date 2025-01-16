@@ -10,6 +10,31 @@ This project implements a multi-modal 2D object detection system that fuses LiDA
     - Process by a Adaptive Fusion block for each grid features. 
 - Produce Detections. 
 
+## Acknowledgments
+
+This project was developed as part of the CSCI-739 term project offered by the Rochester Institute of Technology (RIT). The project was completed under the guidance of <b>[Dr. Fawad Ahmad](https://fawadahm.github.io/)</b> and in collaboration with <b>[Ashutosh Kumar](https://github.com/ashu1069)</b> and <b>[Sarthak Kaushal](https://github.com/Sarthakaushal)</b>.
+
+### Code Contributions
+- Part of the codebase for YOLOv3 implementation is adapted from [PyTorch-YOLOv3 by Erik Lindernoren](https://github.com/eriklindernoren/PyTorch-YOLOv3/tree/master).
+  - Please also refer to the following paper:
+    ```
+    @article{redmon2018yolov3,
+      title={YOLOv3: An Incremental Improvement},
+      author={Redmon, Joseph and Farhadi, Ali},
+      journal={arXiv preprint arXiv:1804.02767},
+      year={2018}
+    }
+    ```
+
+### Dataset
+- This project utilized the [KITTI Dataset](http://www.cvlibs.net/datasets/kitti/) for training and evaluation purposes. 
+  ```
+  Geiger, A., Lenz, P., Stiller, C., & Urtasun, R. (2013). 
+  Vision meets robotics: The kitti dataset. 
+  The International Journal of Robotics Research, 32(11), 1231-1237.
+  ```
+
+
 ### Data Preprocessing
 ![data_preprocessing_pipeline](samples/datapreproessing_steps_visualize.png)
 
