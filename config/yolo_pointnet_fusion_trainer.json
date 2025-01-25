@@ -9,7 +9,8 @@
             "right_image_dir":null,
             "labels_dir":"data/labels/training/label_2",
             "shuffle":true,
-            "apply_augmentation":false
+            "apply_augmentation":false,
+            "apply_data_fusion":true
         },
         "validation_dataset_kwargs":{
             "lidar_dir":"data/velodyne/validation/velodyne",
@@ -20,7 +21,8 @@
             "right_image_dir":null,
             "labels_dir":"data/labels/validation/label_2",
             "shuffle":false,
-            "apply_augmentation":false            
+            "apply_augmentation":false,
+            "apply_data_fusion":true            
         }, 
         "image_resize":[416, 416], 
         "perform_validation":false
