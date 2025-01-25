@@ -1,0 +1,28 @@
+Understanding the Diagram
+1. Input Transform (T-Net)
+
+Purpose: Align the input point cloud to a canonical orientation.
+Input: 𝑁×3 (LiDAR points with 𝑥,𝑦,𝑧).
+Operation: A small T-Net predicts a 3×3 matrix. The input points are multiplied by this matrix to produce aligned points.
+
+2. Shared MLP for Feature Learning
+
+Purpose: Extract per-point features from the aligned points.
+Shared MLP: A Multi-Layer Perceptron (MLP) with layers (64, 64) is applied to each point. Shared across points to ensure point permutation invariance.
+Output: 𝑁×64
+
+3. Feature Transform (T-Net)
+
+Purpose: Align feature representations for invariance.
+Operation: Another T-Net predicts a 64×64 matrix. Features from the first MLP (𝑁×64) are transformed with this matrix.
+
+4. Global Feature Aggregation
+
+Purpose: Create a global descriptor of the point cloud.
+Operation: A deeper MLP (64, 128, 1024) learns higher-order features for each point. A max pooling operation aggregates these features into a global feature vector of size 
+1×1024.
+
+5. Classification or Segmentation
+
+Classification: The global feature is passed through an MLP (512, 256, 𝑘) to predict object classes (e.g., car, pedestrian, etc.).
+Segmentation: The global feature is concatenated back with per-point features (𝑁×128). A point-wise MLP (128, 𝑚) predicts segmentation labels for each point.
