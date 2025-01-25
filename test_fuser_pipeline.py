@@ -11,7 +11,7 @@ from dataset_utils.enums import Enums
 from model.yolo import Darknet
 from model.point_net import PointNetBackbone
 from model.t_net import PointNetCls 
-from model.yolo_pointnet_fuser import FuserPipeline
+from model.yolov3_pointnet_fuser import FuserPipeline
 from model.yolo_utils import xywh2xyxy, reshape_outputs, apply_sigmoid_activation, non_max_suppression, rescale_boxes, get_batch_statistics, ap_per_class
 from test_yolo import draw_and_save_output_images
 
