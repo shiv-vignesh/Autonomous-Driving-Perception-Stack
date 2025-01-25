@@ -9,7 +9,7 @@ from terminaltables import AsciiTable
 from scipy.interpolate import griddata
 
 from .logger import Logger
-from model.yolo_pointnet_fuser import FuserPipeline
+from model.yolov3_pointnet_fuser import FuserPipeline
 from model.yolo_utils import xywh2xyxy, non_max_suppression, get_batch_statistics, ap_per_class
 from dataset_utils.kitti_2d_objectDetect import Kitti2DObjectDetectDataset, KittiLidarFusionCollateFn
 from dataset_utils.enums import Enums
