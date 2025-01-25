@@ -230,10 +230,10 @@ class Kitti2DObjectDetectDataset(Dataset):
         
 class KittiLidarFusionCollateFn(object):
     
-    def __init__(self, image_resize:list, original_size:tuple=(1242, 375),
+    def __init__(self, image_resize:list, original_size:tuple=(1242, 375), apply_data_fusion:bool=True,
                 precomputed_voxel_dir:str=None, precomputed_proj2d_dir:str=None,
                 transformation=None, clip_distance:float=2.0, apply_augmentation:bool=True,
-                project_2d:bool=False, voxelization:bool=False, 
+                project_2d:bool=False, voxelization:bool=False, grid_sizes:list=None,
                 categorize_labels:bool=False):        
         
         self.image_resize = image_resize
@@ -242,6 +242,7 @@ class KittiLidarFusionCollateFn(object):
         self.project_2d = project_2d
         self.voxelization = voxelization
         self.original_size = original_size
+        self.apply_data_fusion = apply_data_fusion
         
         self.original_width = self.original_size[0]
         self.original_height = self.original_size[1]
@@ -255,7 +256,10 @@ class KittiLidarFusionCollateFn(object):
         self.precomputed_voxel_dir = precomputed_voxel_dir if precomputed_voxel_dir is not None else ""
         self.precomputed_proj2d_dir = precomputed_proj2d_dir if precomputed_proj2d_dir is not None else ""
         
-        self.grid_sizes = [(13, 13), (26, 26), (52, 52)]        
+        if grid_sizes is None: # default to yolov3 grids
+            self.grid_sizes = [(13, 13), (26, 26), (52, 52)]        
+        else:
+            self.grid_sizes = grid_sizes
         
         if self.transformation is None:
             self.transformation = albumentations.Compose(
@@ -605,10 +609,14 @@ class KittiLidarFusionCollateFn(object):
             if os.path.exists(lidar_file_path):
                 lidar_point_cloud = np.fromfile(lidar_file_path, dtype=np.float32).reshape(-1, 4)
                 
-                combined_image = self.preprocess_yolo_inputs(
-                    lidar_point_cloud, calibration_dict, 
-                    left_image_arr, right_image_arr
-                )    
+                if self.apply_data_fusion:
+                    combined_image = self.preprocess_yolo_inputs(
+                        lidar_point_cloud, calibration_dict, 
+                        left_image_arr, right_image_arr
+                    )    
+
+                else:
+                    combined_image = left_image_arr if left_image_arr is not None else right_image_arr
                 
                 valid_lidar_points_dict, voxelized_point_cloud = self.preprocess_pointnet_inputs(
                     lidar_point_cloud, lidar_file_path, calibration_dict
