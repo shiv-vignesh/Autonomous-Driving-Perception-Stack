@@ -10,7 +10,7 @@ from train import load_model, load_from_darknet53
 from model.yolo import Darknet
 from model.point_net import PointNetBackbone
 from model.t_net import PointNetCls 
-from model.yolo_pointnet_fuser import FuserPipeline
+from model.yolov3_pointnet_fuser import FuserPipeline
 
 from trainer.trainer_adaptive_fusion import AdaptiveFusionTrainer
 
