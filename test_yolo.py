@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import NullLocator
@@ -117,7 +118,11 @@ def draw_and_save_output_images(image_detections:list,
 
             color = bbox_colors[int(np.where(unique_labels == int(cls_pred))[0])]
             # Create a Rectangle patch
-            bbox = patches.Rectangle((x1, y1), box_w, box_h, linewidth=2, edgecolor=color, facecolor="none")
+            bbox = patches.Rectangle(
+                (x1, y1), box_w, box_h, 
+                linewidth=0.8, 
+                edgecolor=color, 
+                facecolor=(*mcolors.to_rgba(color)[:3], 0.3))
             # Add the bbox to the plot
             ax.add_patch(bbox)
             # Add label
@@ -126,8 +131,10 @@ def draw_and_save_output_images(image_detections:list,
                 y1,
                 s=f"{classes[int(cls_pred)]}: {conf:.2f}",
                 color="white",
+                fontsize=6,  # Small but readable
                 verticalalignment="top",
-                bbox={"color": color, "pad": 0})
+                bbox={"color": color, "alpha": 0.6, "pad": 1, "linewidth": 0}  # Semi-transparent background
+            )
 
         # Save generated image with detections
         plt.axis("off")
