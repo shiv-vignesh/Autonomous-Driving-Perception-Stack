@@ -36,7 +36,7 @@
         "metric_eval_mode": "strict",
         "metric_average_mode": "macro",
         "epochs": 60,
-        "monitor_train": true,
+        "monitor_train": false,
         "monitor_val": true,
         "gradient_clipping": 1.0,
         "device": "cuda:2", 

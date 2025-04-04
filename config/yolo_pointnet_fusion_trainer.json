@@ -1,24 +1,24 @@
 {
     "dataset_kwargs":{
         "trainer_dataset_kwargs":{
-            "lidar_dir":"data/velodyne/training/velodyne",
+            "lidar_dir":"data/KiTTi/training/velodyne",
             "precomputed_voxel_dir":"",
             "precomputed_proj2d_dir":"",
-            "calibration_dir":"data/calibration/training/calib",
-            "left_image_dir":"data/left_images/training/image_2",
+            "calibration_dir":"data/KiTTi/training/calib",
+            "left_image_dir":"data/KiTTi/training/image_2",
             "right_image_dir":null,
-            "labels_dir":"data/labels/training/label_2",
+            "labels_dir":"data/KiTTi/training/label_2",
             "shuffle":true,
             "apply_augmentation":false
         },
         "validation_dataset_kwargs":{
-            "lidar_dir":"data/velodyne/validation/velodyne",
+            "lidar_dir":"data/KiTTi/validation/velodyne",
             "precomputed_voxel_dir":"",
             "precomputed_proj2d_dir":"",            
-            "calibration_dir":"data/calibration/validation/calib",
-            "left_image_dir":"data/left_images/validation/image_2",
+            "calibration_dir":"data/KiTTi/validation/calib",
+            "left_image_dir":"data/KiTTi/validation/image_2",
             "right_image_dir":null,
-            "labels_dir":"data/labels/validation/label_2",
+            "labels_dir":"data/KiTTi/validation/label_2",
             "shuffle":false,
             "apply_augmentation":false            
         }, 
