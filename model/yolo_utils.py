@@ -3,8 +3,11 @@ import numpy as np
 import torch.nn as nn
 import torchvision
 
-import time
+import time, math
 from tqdm import tqdm
+# import wandb
+
+# wandb.init(project="MLSF-Yolov8-Training") 
 
 def weights_init_normal(m):
     classname = m.__class__.__name__
@@ -72,14 +75,14 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[x[..., 4] > conf_thres]  # confidence
+        # x = x[x[..., 4] > conf_thres]  # confidence
 
         # If none remain process next image
         if not x.shape[0]:
-            continue
-
+            continue        
+        
         # Compute conf
-        x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf        
 
         # Box (center x, center y, width, height) to (x1, y1, x2, y2)
         box = xywh2xyxy(x[:, :4])
@@ -167,7 +170,7 @@ def get_batch_statistics(outputs, targets, iou_threshold):
         batch_metrics.append([true_positives, pred_scores, pred_labels])
     return batch_metrics
 
-def bbox_iou(box1, box2, x1y1x2y2=True):
+def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False):
     """
     Returns the IoU of two bounding boxes
     """
@@ -197,9 +200,34 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
 
-    iou = inter_area / (b1_area + b2_area - inter_area + 1e-16)
-
-    return iou
+    iou = inter_area / (b1_area + b2_area - inter_area + 1e-9)
+    
+    if GIoU or DIoU or CIoU:
+        # convex (smallest enclosing box) width
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+        
+        union = b1_area + b2_area - inter_area + 1e-9
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-9
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-9
+        
+        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            c2 = cw ** 2 + ch ** 2 + 1e-9  # convex diagonal squared
+            rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 +
+                    (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center distance squared
+            if DIoU:
+                return iou - rho2 / c2  # DIoU
+            elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi ** 2) * \
+                    torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
+                with torch.no_grad():
+                    alpha = v / ((1 + 1e-9) - iou + v)
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+        else:  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+            c_area = cw * ch + 1e-9  # convex area
+            return iou - (c_area - union) / c_area  # GIoU
+    else:
+        return iou  # IoU
 
 def ap_per_class(tp, conf, pred_cls, target_cls):
     """ Compute the average precision, given the recall and precision curves.
@@ -337,3 +365,130 @@ def rescale_boxes(boxes, current_dim, original_shape):
     boxes[:, 2] = ((boxes[:, 2] - pad_x // 2) / unpad_w) * orig_w
     boxes[:, 3] = ((boxes[:, 3] - pad_y // 2) / unpad_h) * orig_h
     return boxes
+
+def compute_detection_loss_v8(predictions: torch.Tensor, targets: torch.Tensor, 
+                              num_classes: int, device: torch.device, 
+                              cls_loss_type: str = "focal", alpha=0.25, gamma=2.0):
+    """
+    FIXME, alignment_metric = class_probs.sigmoid().max(1)[0] * iou 
+    """
+    # Initialize losses
+    lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+
+    # Build YOLOv8 targets
+    tcls, tbox, indices = build_targets_v8(predictions, targets)
+
+    # Define Loss Functions
+    BCEcls = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([1.0], device=device))
+    BCEobj = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([1.0], device=device))
+    
+    ious = []
+    
+    for layer_idx, layer_predictions in enumerate(predictions):
+        B, C, H, W = layer_predictions.shape
+        layer_predictions = layer_predictions.permute(0, 2, 3, 1).contiguous()
+        
+        # Get target grid cell indices
+        b, grid_y, grid_x = indices[layer_idx]  # Select only relevant grid cells
+        
+        # Build empty objectness target tensor
+        tobj = torch.zeros((B, H, W), device=device)  # Shape: (B, H, W)
+
+        if b.shape[0] > 0:  # If there are matching targets
+            # Select predictions for responsible grid cells
+            ps = layer_predictions[b, grid_y, grid_x]  # Shape: (num_targets, C)
+
+            box_xy = ps[:, :2].sigmoid()  # (x, y)
+            box_wh = ps[:, 2:4].exp()  # (w, h)
+
+            # Compute IoU Loss for Box Regression
+            pbox = torch.cat((box_xy, box_wh), dim=1)  # (num_targets, 4)
+            iou = bbox_iou(pbox, tbox[layer_idx], x1y1x2y2=False, CIoU=True)
+            ious.append(iou.mean().item())
+
+            lbox += (1.0 - iou).mean()
+            # print("IoU stats: min {:.3f}, max {:.3f}, mean {:.3f}".format(
+            #         iou.min().item(), iou.max().item(), iou.mean().item()))
+
+            # Assign objectness target based on IoU
+            tobj[b, grid_y, grid_x] = iou.detach().clamp(0).type(tobj.dtype)
+
+            # Compute Classification Loss
+            if num_classes > 1:
+                t = torch.zeros_like(ps[:, 5:]  , device=device)  # One-hot encoded target
+                t[range(b.shape[0]), tcls[layer_idx]] = 1  # Assign correct class index
+
+                if cls_loss_type == "focal":
+                    # BCE Loss (Manually computed since class_probs already has sigmoid applied)
+                    # bce_loss = - (t * torch.log(class_probs + 1e-8) + (1 - t) * torch.log(1 - class_probs + 1e-8))
+                    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(ps[:, 5:], t, reduction="none")
+                    pt = torch.exp(-bce_loss)
+                    bce_loss = alpha * (1 - pt) ** gamma * bce_loss
+                    lcls += bce_loss.mean()
+                else:
+                    lcls += BCEcls(ps[:, 5:], t)
+
+            # wandb.log({
+            #     # 'class_scores':ps[:, 5:].sigmoid()
+            #     f'class_{idx}':ps[:, 5+idx].sigmoid().mean().detach().cpu().item() for idx in range(num_classes)
+            # })
+
+        # Compute Objectness Loss (Only once)        
+        lobj += BCEobj(layer_predictions[..., 4], tobj)
+        # raw_obj_logits = layer_predictions[..., -1].sigmoid()
+        # print("Raw objectness logits: mean {:.3f}, min {:.3f}, max {:.3f}".format(
+        #     raw_obj_logits.mean().item(), raw_obj_logits.min().item(), raw_obj_logits.max().item()))                        
+
+    # Scale Losses
+    lbox *= 0.05
+    lobj *= 1.0
+    lcls *= 0.5
+
+    # Compute Total Loss
+    loss = lbox + lobj + lcls
+    
+    # wandb.log(
+    #     {"lbox": lbox.detach().cpu().item(), "lobj": lobj.detach().cpu().item(), "lcls": lcls.detach().cpu().item()}
+    # )
+    
+    # wandb.log({
+    #     'ious':sum(ious)/len(ious)        
+    # })
+    
+    return loss, torch.cat((lbox.detach().cpu(), lobj.detach().cpu(), lcls.detach().cpu(), loss.detach().cpu())), ious
+
+def build_targets_v8(predictions:torch.Tensor, target:torch.Tensor):
+    ''' 
+    Assign ground truth to grid cells of yolov8 (80x80, 40x40, 20x20)
+    
+    Args:
+        predictions - List[tensor] --> feature maps of (bs, num_cls + 5, h, w)
+        target - Tensor of shape (M, 6) --> (batch_idx, class_id, x, y, w, h)
+
+    Returns:
+        tcls (list): Class indices for selected grid cells. (target_class indices)
+        tbox (list): Box coordinates for selected grid cells. (target bbox for selected grid cells)
+        indices (list): (batch_id, grid_y, grid_x) for each grid scale. 
+    '''
+    
+    tcls, tbox, indices = [], [], []    
+    for layer_idx, layer_predictions in enumerate(predictions):
+        _, _, H, W = layer_predictions.shape
+        
+        #helper tensor to compute grid dimension relevant targets (normalized target to grid_w and grid_h)
+        gain = torch.tensor([1, 1, W, H, W, H], device=target.device).float()
+        t_grid = target * gain #convert to grid space from normalized score 
+        
+        #get integer indices of grid cells. 
+        gxy = t_grid[:, 2:4] #across all batches, get the xy values scaled to grid. 
+        gij = gxy.long() #convert to long for indices 
+        gi, gj = gij.T 
+        
+        # Store grid cell indices, box targets, and class targets
+        indices.append((t_grid[:, 0].long(), gi.clamp_(0, W - 1), gj.clamp_(0, H - 1)))
+        tbox.append(torch.cat((gxy - gij, t_grid[:, 4:6]), 1))  # Box offset
+        tcls.append(t_grid[:, 1].long())  # Class ID     
+        
+    return tcls, tbox, indices
