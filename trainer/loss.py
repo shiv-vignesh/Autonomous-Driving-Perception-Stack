@@ -55,8 +55,32 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=
     else:
         return iou  # IoU
 
+def focal_loss(inputs, targets, alpha=0.25, gamma=2.0, reduction="mean"):
+    """
+    Compute focal loss for binary classification.
+    Inputs:
+        inputs: raw logits, tensor of shape (N, *).
+        targets: binary targets (0 or 1), same shape as inputs.
+        alpha: balancing factor.
+        gamma: focusing parameter.
+        reduction: 'mean' or 'sum'.
+    Returns:
+        scalar loss.
+    """
+    # Compute binary cross-entropy loss with logits (no reduction)
+    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    # Get the probability of the true class
+    pt = torch.exp(-bce_loss)
+    loss = alpha * (1 - pt) ** gamma * bce_loss
+    if reduction == "mean":
+        return loss.mean()
+    elif reduction == "sum":
+        return loss.sum()
+    else:
+        return loss    
 
-def compute_loss(predictions, targets, model, eval_debug:bool=False):
+def compute_loss(predictions, targets, model, eval_debug:bool=False, 
+                model_type:str='yolov3', cls_loss_type:str="focal"):
     # Check which device was used
     device = targets.device
 
@@ -64,7 +88,7 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False):
     lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
 
     # Build yolo targets
-    tcls, tbox, indices, anchors = build_targets(predictions, targets, model)  # targets
+    tcls, tbox, indices, anchors = build_targets(predictions, targets, model, model_type)  # targets
 
     # Define different loss functions classification
     BCEcls = nn.BCEWithLogitsLoss(
@@ -93,7 +117,7 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False):
             # Apply exponent to wh predictions and multiply with the anchor box that matched best with the label for each cell that has a target
             pwh = torch.exp(ps[:, 2:4]) * anchors[layer_index]
             # Build box out of xy and wh
-            pbox = torch.cat((pxy, pwh), 1)
+            pbox = torch.cat((pxy, pwh), 1)         
             # Calculate CIoU or GIoU for each target with the predicted box for its cell + anchor
             iou = bbox_iou(pbox.T, tbox[layer_index], x1y1x2y2=False, CIoU=True)
             # We want to minimize our loss so we and the best possible IoU is 1 so we take 1 - IoU and reduce it with a mean
@@ -109,29 +133,38 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False):
                 # Hot one class encoding
                 t = torch.zeros_like(ps[:, 5:], device=device)  # targets
                 t[range(num_targets), tcls[layer_index]] = 1
-                # Use the tensor to calculate the BCE loss
-                lcls += BCEcls(ps[:, 5:], t)  # BCE
+                
+                if cls_loss_type == "focal":
+                    lcls += focal_loss(ps[:, 5:], t, alpha=0.25, gamma=2.0, reduction="mean")
+                elif cls_loss_type == "bce":
+                    # Use the tensor to calculate the BCE loss
+                    lcls += BCEcls(ps[:, 5:], t)# BCE
 
         # Classification of the objectness the sequel
         # Calculate the BCE loss between the on the fly generated target and the network prediction
         lobj += BCEobj(layer_predictions[..., 4], tobj) # obj loss
 
-    lbox *= 0.05
-    lobj *= 1.0
-    lcls *= 0.5
+    if model_type == 'yolov3':
+        lbox *= 0.05
+        lobj *= 1.0
+        lcls *= 0.5
+    
+    elif model_type == 'yolov8':
+        lbox *= 0.05
+        lobj *= 1.0
+        lcls *= 0.5
     
     if eval_debug:
         # print(f'lbox + lobj + lcls: {lbox} + {lobj} + {lcls}')
         pass
         
-
     # Merge losses
     loss = lbox + lobj + lcls
 
     return loss, to_cpu(torch.cat((lbox, lobj, lcls, loss)))
 
 
-def build_targets(p, targets, model):
+def build_targets(p, targets, model, model_type:str='yolov3'):
     # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
     na, nt = 3, targets.shape[0]  # number of anchors, targets #TODO
     tcls, tbox, indices, anch = [], [], [], []
@@ -142,12 +175,20 @@ def build_targets(p, targets, model):
     
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)
     
-    for i, yolo_layer in enumerate(model.yolo_layers):
+    if model_type == 'yolov3':
+        detection_layers = model.yolo_layers
+    elif model_type == 'yolov8':
+        #detection head module
+        detection_layers = model.values()
+    
+    # for i, yolo_layer in enumerate(model.yolo_layers):
+    for i, yolo_layer in enumerate(detection_layers):
         # Scale anchors by the yolo grid cell size so that an anchor with the size of the cell would result in 1
         anchors = yolo_layer.anchors / yolo_layer.stride
+                
         # Add the number of yolo cells in this layer the gain tensor
         # The gain tensor matches the collums of our targets (img id, class, x, y, w, h, anchor id)
-
+        
         gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
         # Scale targets by the number of yolo layer cells, they are now in the yolo cell coordinate system
         t = targets * gain
