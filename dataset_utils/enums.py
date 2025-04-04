@@ -1,5 +1,5 @@
 class Enums:
-    
+
     mapping_dict = {
         'Car': 'Car',
         'Van': 'Car',
@@ -31,6 +31,20 @@ class Enums:
         'Tram': 2,
         'Misc': 2,
         'DontCare': 2
+    }
+
+    KiTTi_label2Id_SSD = {
+        'Background':0,
+        'Car': 1,
+        'Cyclist': 2,
+        'Pedestrian': 3
+    }
+
+    KiTTi_Id2label_SSD = {
+        0: 'Background',
+        1: 'Car',
+        2: 'Cyclist',
+        3: 'Pedestrian',
     }
 
     # KiTTi_label2Id = {
