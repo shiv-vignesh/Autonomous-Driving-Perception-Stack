@@ -24,8 +24,8 @@ class TNet(nn.Module):
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(128)
         self.bn3 = nn.BatchNorm2d(1024)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.bn5 = nn.BatchNorm1d(256)
+        self.bn4 = nn.LayerNorm(512)
+        self.bn5 = nn.LayerNorm(256)
         
         # Initialize the final FC layer with zeros
         nn.init.zeros_(self.fc3.weight)
@@ -46,7 +46,6 @@ class TNet(nn.Module):
         # Fully connected layers
         x = F.relu(self.bn4(self.fc1(x)))
         x = F.relu(self.bn5(self.fc2(x)))
-        
         # Add identity matrix to the output
         identity = torch.eye(self.k, requires_grad=True).repeat(batch_size, 1, 1)
         if x.is_cuda:
