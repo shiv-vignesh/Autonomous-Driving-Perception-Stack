@@ -168,7 +168,7 @@ class YOLOLayer(nn.Module):
         x = x.view(bs, self.num_anchors, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
         if not self.training:
             x = x.view(bs, -1, self.no)
-        
+
         return x
 
         # if not self.training:  # inference
