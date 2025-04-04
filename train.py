@@ -29,7 +29,7 @@ def load_torch_mismatch_weights(model:Darknet, pth_file:str):
             elif 'bias' in model_layer:
                 model_dict[model_layer] = torch.nn.init.constant_(
                     model_dict[model_layer], 0.0
-                )                
+                )
             
     return model.load_state_dict(model_dict)
 
@@ -76,7 +76,7 @@ def load_model(config_path:str, weights_path:str=None):
             # Load darknet weights
             model.load_darknet_weights(weights_path)
     return model
-    
+
 if __name__ == "__main__":    
     trainer_config = json.load(open('config/yolo_trainer.json'))
     
@@ -94,7 +94,7 @@ if __name__ == "__main__":
             model = load_model(cfg_file_path, weights_path=weights_pth_path)
         else:
             model = load_model(cfg_file_path)
-    
+
     ''' 
     TODO
     1. Add Logs after _init_dataloader, _init_optimizer 

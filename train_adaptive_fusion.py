@@ -8,7 +8,6 @@ import torch.utils.data
 from train import load_model, load_from_darknet53
 
 from model.yolo import Darknet
-from model.point_net import PointNetBackbone
 from model.t_net import PointNetCls 
 from model.yolo_pointnet_fuser import FuserPipeline
 
@@ -52,7 +51,7 @@ def load_pointnet(pointnet_kwargs:dict, weights_path:str):
     return point_net.feature_transform
 
 def create_fuser_pipeline(yolo:Darknet, 
-            point_net: PointNetBackbone,
+            point_net,
             yolo_device: torch.device,
             point_net_device: torch.device, 
             adaptive_fusion_kwargs: dict):
@@ -75,8 +74,8 @@ if __name__ == "__main__":
     pointnet_weights_pth_path = ''
         
     yolo_cfg_path = 'config/yolov3-yolo_reduced_classes.cfg'    
-    spatial_fusion_ckpt_dir = 'Spatial-Fusion-Pipeline/best-model'
-    spatial_fusion_ckpt = 24
+    spatial_fusion_ckpt_dir = 'Robust-Spatial-Fusion-Pipeline-3/best-model'
+    spatial_fusion_ckpt = 3
     
     yolo_device, pointnet_device = prepare_device_ids(trainer_config['trainer_kwargs'])
     
@@ -93,7 +92,7 @@ if __name__ == "__main__":
     
     point_net = load_pointnet(trainer_config['pointnet_kwargs'], pointnet_weights_pth_path)
     point_net.to(pointnet_device)
-    
+
     fuser_pipeline = create_fuser_pipeline(yolo, point_net, yolo_device, pointnet_device, trainer_config['adaptive_fusion_kwargs'])
     
     if os.path.exists(spatial_fusion_ckpt_dir):
