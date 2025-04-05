@@ -2,6 +2,8 @@
 
 This project implements a multi-modal 2D object detection system that fuses LiDAR point cloud data with camera images using the KITTI dataset.
 
+Developed by Shiv Vignesh. 
+
 ## Highlights
 - Yolov3 + Pointnet : Spatial Transformation Fusion 
   - 📌 Uses raw point clouds
