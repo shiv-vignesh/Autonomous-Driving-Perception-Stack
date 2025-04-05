@@ -1,18 +1,23 @@
-# Multi-Modal 2D Object Detection - Spatial-IL Fusion Pipeline
+# Multi-Modal 2D Object Detection
 
 This project implements a multi-modal 2D object detection system that fuses LiDAR point cloud data with camera images using the KITTI dataset.
 
 ## Highlights
-- Pointnet Backbone - LiDAR point cloud processing. 
-- YOLOv3 Backbone - Image input processing. 
-- Adaptive Fusion Backbone that combines Lidar and Image features. 
-    - Project LiDAR point cloud features from `(1024, N)` to `[(yolo_grid_x, yolo_grid_y, 1024)]`. 
-    - Process by a Adaptive Fusion block for each grid features. 
-- Produce Detections. 
+- Yolov3 + Pointnet : Spatial Transformation Fusion 
+  - 📌 Uses raw point clouds
+  - ​🔄 Aligns features to image space​
 
-## Acknowledgments
+- Twin Backbone Fusion
+  - 🗺️ Converts to 2D (Depth, BEV)​
+  - ⚡ Parallel feature extraction​, same model architecture for image and lidar stream.
 
-This project was developed as part of the CSCI-739 term project offered by the Rochester Institute of Technology (RIT). The project was completed under the guidance of <b>[Dr. Fawad Ahmad](https://fawadahm.github.io/)</b> and in collaboration with <b>[Ashutosh Kumar](https://github.com/ashu1069)</b> and <b>[Sarthak Kaushal](https://github.com/Sarthakaushal)</b>.
+- Simple Cross Adaptive Fusion
+  - 🔗 Concatenation + CNN-based refinement​
+  - ⚖️ Treats all features equally​
+
+- Attention Based Fusion
+  - 🎯 Cross-attention + adaptive weighting​
+  - 🔍 Prioritizes important features dynamically​
 
 ### Code Contributions
 - Part of the codebase for YOLOv3 implementation is adapted from [PyTorch-YOLOv3 by Erik Lindernoren](https://github.com/eriklindernoren/PyTorch-YOLOv3/tree/master).
@@ -34,11 +39,12 @@ This project was developed as part of the CSCI-739 term project offered by the R
   The International Journal of Robotics Research, 32(11), 1231-1237.
   ```
 
-
-### Data Preprocessing
+## Data Preprocessing
 ![data_preprocessing_pipeline](samples/datapreproessing_steps_visualize.png)
 
-### Multi-Modal Pipeline - Spatial-IL Fusion Pipeline
+## Yolov3 + Pointnet : Spatial Transformation Fusion
+
+### Model Pipeline
 ![Spatial-IL Fusion Pipeline](samples/Proposed-Methodology-Complete.png)
 
 ### Detection Outputs
@@ -46,7 +52,47 @@ This project was developed as part of the CSCI-739 term project offered by the R
 ![Spatial-IL Fusion Pipeline Detection](samples/000181_detection.png)
 ![Spatial-IL Fusion Pipeline Detection](samples/000618_detection.png)
 
-## Usage 
+## Twin Backbone Fusion
+
+### Model Pipeline
+![Twin Backbone Fusion](samples/twinbackbone_model_fusion.png)
+
+### Detection Outputs
+![Twin Backbone Pipeline Detection](results/MLSF-YOLO-Attention-FocalLoss/best-model/detections/001872.png)
+![Twin Backbone Pipeline Detection](results/MLSF-YOLO-Attention-FocalLoss/best-model/detections/000073.png)
+![Twin Backbone Pipeline Detection](results/MLSF-YOLO-Attention-FocalLoss/best-model/detections/002892.png)
+
+## Adaptive Fusion Block
+
+<div style="display: flex; justify-content: space-around;">
+    <div style="flex: 0 0 48%;">
+        <img src="samples/Simple-Adaptive-Fusion.png" alt="Simple-Adaptive-Fusion" style="width: 100%;"/>
+        <p> <b>Simple-Adaptive-Cross-Fusion</b>
+Feature Concatenation: Image and LiDAR features are directly concatenated along the channel dimension.​ 
+        
+Shared Feature Extraction: A 3×3 convolutional layer learns shared representations from both modalities. 
+
+The extracted features are split back into separate image and LiDAR feature maps.​ 
+
+1×1 convolutions refine the features independently for each modality, adapting them to their respective networks.​</p>
+    </div>
+    <div style="flex: 0 0 48%;">
+        <img src="samples/Attention Based Cross-Fusion​.png" alt="Attention Based Cross Fusion" style="width: 100%;"/>
+        <p><b>Attention Based Cross-Fusion</b>
+
+Dimension Reduction: Compresses image and LiDAR features via 1×1 convolutions for efficiency.​
+
+Cross-Attention: Uses Query, Key, and Value to compute attention weights, highlighting important features.​
+
+Adaptive Fusion: Reweights and fuses attended features dynamically.​
+
+Gating Mechanism (if enabled): Learns optimal weighting of image and LiDAR features based on context.</p>
+    </div>
+</div>
+
+---
+
+## Usage
 
 1. Prepare the KITTI dataset:
 
@@ -54,215 +100,226 @@ This project was developed as part of the CSCI-739 term project offered by the R
     - Organize the data in the following structure:
 
             data/
-                ├── calibration/
-                │   └── training/
-                │       └── calib/
-                ├── left_images/
-                │   └── training/
-                │       └── image_2/
-                ├── labels/
-                │   └── training/
-                │       └── label_2/
-                └── velodyne/
-                    └── training/
-                        └── velodyne/
+                ├── training/
+                │   └── calib/
+                │   └── image_2/
+                │   └── label_2/
+                │   └── velodyne/
+                ├── validation/
+                │   └── calib/
+                │   └── image_2/
+                │   └── label_2/
+                │   └── velodyne/                
 
-## Configuration File: `config/yolo_pointnet_fusion_trainer.json`
 
-Customize the pipeline by editing the following sections in the JSON file:
 
-### 1. **Dataset Configuration (`dataset_kwargs`)**
+1. **YOLO-PointNet Fusion**  
+   📄 Config: [`config/yolo_pointnet_fusion_trainer.json`](config/yolo_pointnet_fusion_trainer.json)
 
-#### Training Dataset
-Specify paths and parameters for training & Validation data:
+2. **Twin-Backbone MLSF-YOLOv8 Fusion**  
+   📄 Config: [`config/twin_backbone_trainer.json`](config/mlsf_trainer.json)
+
+Both models support feature-level fusion, independent backbone training, and robustness augmentations.
+
+---
+
+## 🔧 Common Configuration Blocks
+
+The following sections are common to both model configurations.
+
+### `dataset_kwargs`
+
+Controls dataset paths and preprocessing:
+
 ```json
-"trainer_dataset_kwargs": {
-    "lidar_dir": "data/velodyne/training/velodyne",
-    "calibration_dir": "data/calibration/training/calib",
-    "left_image_dir": "data/left_images/training/image_2",
-    "labels_dir": "data/labels/training/label_2",
+"dataset_kwargs": {
+  "image_resize": [640, 640],
+  "perform_validation": false,
+  "kitti_trainer_dataset_kwargs": {
+    "lidar_dir": "data/KiTTi/training/velodyne",
+    "left_image_dir": "data/KiTTi/training/image_2",
+    "labels_dir": "data/KiTTi/training/label_2",
     "shuffle": true,
-    "apply_augmentation": false
-}
-
-"validation_dataset_kwargs": {
-    "lidar_dir": "data/velodyne/validation/velodyne",
-    "calibration_dir": "data/calibration/validation/calib",
-    "left_image_dir": "data/left_images/validation/image_2",
-    "labels_dir": "data/labels/validation/label_2",
+    "apply_augmentation": false,
+    "batch_size": 8
+  },
+  "kitti_validation_dataset_kwargs": {
+    "lidar_dir": "data/KiTTi/validation/velodyne",
+    "left_image_dir": "data/KiTTi/validation/image_2",
+    "labels_dir": "data/KiTTi/validation/label_2",
     "shuffle": false,
-    "apply_augmentation": false
-}
-``` 
-#### Define the PointNet backbone settings:
-```json
-"pointnet_kwargs": {
-    "num_points": 75000,
-    "num_global_feats": 1024
+    "apply_augmentation": false,
+    "batch_size": 12
+  }
 }
 ```
 
-#### Adjust fusion-related parameters:
-```json
-"adaptive_fusion_kwargs": {
-    "fusion_type": "residual",
-    "transform_image_features": false
-}
-```
-
-# YOLO PointNet Fusion Training Pipeline
-
-This project implements a training pipeline for fusing YOLO-based object detection with PointNet for point cloud processing. Below is an explanation of the `trainer_kwargs` section in the configuration file.
-
 ---
 
-## Trainer Configuration (`trainer_kwargs`)
+### `trainer_kwargs`
 
-The `trainer_kwargs` section in the JSON configuration file controls the behavior of the training process. Below is an explanation of each key parameter.
-
-### Key Parameters
-
-1. **`output_dir`**
-   - Specifies the directory where training outputs (e.g., model checkpoints, logs) will be saved.
-   - Example:  
-     ```json
-     "output_dir": "Robust-Spatial-Fusion-Pipeline-3"
-     ```
-
-2. **`is_training`**
-   - Indicates whether the pipeline is in training mode.  
-   - Set to `true` for training and `false` for evaluation or testing.  
-   - Example:  
-     ```json
-     "is_training": true
-     ```
-
-3. **`first_val_epoch`**
-   - The epoch at which validation should start.  
-   - Example:  
-     ```json
-     "first_val_epoch": 0
-     ```
-
-4. **`metric_eval_mode`**
-   - Determines how metrics are calculated. Common modes:  
-     - `strict`: Enforces stricter criteria for evaluation.
-   - Example:  
-     ```json
-     "metric_eval_mode": "strict"
-     ```
-
-5. **`metric_average_mode`**
-   - Specifies the mode for averaging metrics across classes.  
-     - `macro`: Averages metrics equally across all classes.
-   - Example:  
-     ```json
-     "metric_average_mode": "macro"
-     ```
-
-6. **`epochs`**
-   - The total number of training epochs.  
-   - Example:  
-     ```json
-     "epochs": 60
-     ```
-
-7. **`monitor_train`**
-   - Toggles monitoring of training metrics.  
-   - Set to `true` to log training performance.  
-   - Example:  
-     ```json
-     "monitor_train": true
-     ```
-
-8. **`monitor_val`**
-   - Toggles monitoring of validation metrics.  
-   - Set to `true` to log validation performance.  
-   - Example:  
-     ```json
-     "monitor_val": true
-     ```
-
-9. **`gradient_clipping`**
-   - Limits the magnitude of gradients to stabilize training.  
-   - Example:  
-     ```json
-     "gradient_clipping": 1.0
-     ```
-
-10. **`yolo_device_id`**
-    - Specifies the device for running the YOLO model (e.g., `cuda:0` for the first GPU).  
-    - Example:  
-      ```json
-      "yolo_device_id": "cuda:0"
-      ```
-
-11. **`pointnet_device_id`**
-    - Specifies the device for running the PointNet model.  
-    - Example:  
-      ```json
-      "pointnet_device_id": "cuda:1"
-      ```
-
-12. **`checkpoint_idx`**
-    - Indicates the index of the checkpoint to load for resuming training.  
-    - Example:  
-      ```json
-      "checkpoint_idx": 10
-      ```
-
-13. **`gradient_accumulation_steps`**
-    - The number of steps to accumulate gradients before performing a weight update. Useful for training with limited GPU memory.  
-    - Example:  
-      ```json
-      "gradient_accumulation_steps": 4
-      ```
-
-14. **`compute_feature_alignment`**
-    - Enables feature alignment computation between YOLO and PointNet.  
-    - Example:  
-      ```json
-      "compute_feature_alignment": false
-      ```
-
-15. **`yolo_lr_burn_in`**
-    - Toggles a learning rate warm-up phase for YOLO training.  
-    - Example:  
-      ```json
-      "yolo_lr_burn_in": true
-      ```
-
-16. **`robustness_augmentations`**
-    - Specifies a list of data augmentations to improve model robustness.  
-    - Example:  
-      ```json
-      "robustness_augmentations": ["SaltPapperNoise", "pixelate"]
-      ```
-
----
-
-### Example `trainer_kwargs` Configuration
-
-Here is a complete example of a `trainer_kwargs` configuration:
+Manages the training loop and evaluation strategy:
 
 ```json
 "trainer_kwargs": {
-    "output_dir": "Robust-Spatial-Fusion-Pipeline-3",
-    "is_training": true,
-    "first_val_epoch": 0,
-    "metric_eval_mode": "strict",
-    "metric_average_mode": "macro",
-    "epochs": 60,
-    "monitor_train": true,
-    "monitor_val": true,
-    "gradient_clipping": 1.0,
-    "yolo_device_id": "cuda:0",
-    "pointnet_device_id": "cuda:1",
-    "checkpoint_idx": 10,
-    "gradient_accumulation_steps": 4,
-    "compute_feature_alignment": false,
-    "yolo_lr_burn_in": true,
-    "robustness_augmentations": ["SaltPapperNoise", "pixelate"]
+  "output_dir": "output_dir_name",
+  "is_training": true,
+  "epochs": 50,
+  "first_val_epoch": 0,
+  "monitor_train": true,
+  "monitor_val": true,
+  "gradient_clipping": 1.0,
+  "gradient_accumulation_steps": 4,
+  "checkpoint_idx": 5,
+  "robustness_augmentations": ["SaltPapperNoise", "pixelate"]
 }
+```
+
+---
+
+## 🔍 YOLO-PointNet Fusion  
+📄 Config: [`config/yolo_pointnet_fusion_trainer.json`](config/yolo_pointnet_fusion_trainer.json)
+
+This model fuses YOLO-based image features with PointNet features from LiDAR.
+
+### ➕ `pointnet_kwargs`
+
+```json
+"pointnet_kwargs": {
+  "num_points": 75000,
+  "num_global_feats": 1024
+}
+```
+
+### 🔁 `adaptive_fusion_kwargs`
+
+```json
+"adaptive_fusion_kwargs": {
+  "fusion_type": "residual",
+  "transform_image_features": false,
+  "alpha": 1.0
+}
+```
+
+### ⚙️ `optimizer_kwargs`
+
+```json
+"optimizer_kwargs": {
+  "type": "AdamW",
+  "train_yolo_backbone": true,
+  "train_yolo_detection": true,
+  "train_pointnet": true,
+  "train_fusion_layers": true,
+  "pointnet_lr": 3e-5,
+  "pointnet_momentum": 0.9,
+  "pointnet_decay": 1e-4,
+  "fusion_lr": 5e-3,
+  "fusion_momentum": 0.9,
+  "fusion_decay": 1e-4
+}
+```
+
+---
+
+## 🚀 Twin-Backbone MLSF-YOLOv8 Fusion  
+📄 Config: [`config/twin_backbone_trainer.json`](config/twin_backbone_trainer.json)
+
+This model uses separate image and LiDAR backbones with attention-based fusion.
+
+### 🧠 `model_kwargs`
+
+```json
+"model_kwargs": {
+  "model_type": "mlsf_yolov8",
+  "mlsf_yolo_kwargs": {
+    "cfg_file": "config/yolov3-yolo_reduced_classes.cfg",
+    "yolov8_weights_path": "yolov8l.pt",
+    "image_channels": 3,
+    "lidar_channels": 3,
+    "image_backbone_device": "cuda:16",
+    "lidar_backbone_device": "cuda:17",
+    "adaptive_fusion_device": "cuda:19",
+    "apply_adaptive_fusion": true,
+    "fusion_type": "attention",
+    "num_fusion_blocks": 2,
+    "weighted_fusion": false,
+    "model_seed": 101
+  }
+}
+
+```
+## 📝 Note on `config/yolov3-yolo_reduced_classes.cfg` and YOLOv3 Architecture
+
+The file `config/yolov3-yolo_reduced_classes.cfg` defines the configuration for a **YOLOv3** model with a reduced number of classes that is used by both the methods. YOLOv3 implementation is adapted from [PyTorch-YOLOv3 by Erik Lindernoren](https://github.com/eriklindernoren/PyTorch-YOLOv3/tree/master). 
+
+
+> Optionally supports `mlsf_ssd_kwargs` for MobileNetV2-SSD-based fusion.
+
+### ⚙️ `optimizer_kwargs`
+
+```json
+"optimizer_kwargs": {
+  "type": "AdamW",
+  "image_backbone_lr": 3e-3,
+  "lidar_backbone_lr": 3e-3,
+  "adaptive_fusion_lr": 3e-3,
+  "ssd_head_lr": 5e-3,
+  "momentum": 0.9,
+  "weight_decay": 0.9,
+  "tune_lidar_backbone": true,
+  "tune_image_backbone": true
+}
+```
+
+---
+
+## 🧪 Robustness Options
+
+Both models support robustness configurations:
+
+- `"robustness_augmentations"`: e.g., `["SaltPapperNoise", "pixelate"]`
+- `"modality_dropout"` / `"modality_corrupt"`: Enable modality dropout/corruption
+- `"p_modality_dropout"`: Probability of modality dropout during training
+
+---
+
+## 🖥 Device Control
+
+Assign specific GPUs to each component for efficient multi-GPU training:
+
+- `yolo_device_id`, `pointnet_device_id`
+- `image_backbone_device`, `lidar_backbone_device`, `adaptive_fusion_device`
+
+---
+
+## 🔁 Resuming Training
+
+- Set `"checkpoint_idx"` to resume from a specific checkpoint.
+- Outputs are saved to `"output_dir"` with logs and models.
+
+---
+
+## 🚀 Run Training
+
+```bash
+# YOLO-PointNet
+python train_adaptive_fusion.pyjson
+
+# Twin-Backbone Fusion
+python train_mlsf.py
+```
+
+---
+
+## 📎 Notes
+
+- Make sure your dataset follows the KITTI format.
+- Ensure all paths and device IDs are valid before running.
+- Modify `image_resize` consistently across model and dataset configs.
+
+---
+
+Happy fusing! 🚘📦📡
+
 
 
