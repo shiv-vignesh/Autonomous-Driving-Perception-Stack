@@ -16,6 +16,47 @@ from .enums import Enums
 #monkey patch for iaa augmentation
 np.bool = bool
 
+def draw_bev_with_boxes(bev_map, targets, boundary, grid_x_res, grid_y_res, class_colors=None):
+    """
+    Draw the bounding boxes on top of the BEV map, using the class_id for coloring.
+    """
+    bev_image = np.zeros((bev_map.shape[1], bev_map.shape[2], 3), dtype=np.uint8)
+
+    class_colors = {
+        0: (255, 0, 0),  # Red (class 0)
+        1: (0, 255, 0),  # Green (class 1)
+        2: (0, 0, 255)   # Blue (class 2)
+    }
+
+    # Map intensity, height, and density to color channels (or just use one channel if needed)
+    for i in range(3):
+        bev_image[:, :, i] = np.clip(bev_map[i] * 255, 0, 255).astype(np.uint8)
+
+    for target in targets:
+        # Extract target info
+        batch_idx, class_id, y_l, x_l, w, l, sin_yaw, cos_yaw = target
+
+        # Convert (x, y) from normalized BEV coordinates to pixel coords
+        px = int(x_l * bev_map.shape[2])  # x_l normalized to width
+        py = int(y_l * bev_map.shape[1])  # y_l normalized to height
+
+        # Size in BEV pixels (ensure they are large enough for visibility)
+        pw = int(w * bev_map.shape[2])  # Width in pixels
+        pl = int(l * bev_map.shape[1])  # Length in pixels
+
+        # Calculate the yaw from sin/cos
+        yaw = np.arctan2(sin_yaw, cos_yaw)
+
+        # Create a rotated rectangle with the given center (px, py), size (pw, pl), and yaw
+        rect = ((px, py), (pl, pw), np.degrees(yaw))  # Rotate in degrees
+        box_pts = cv2.boxPoints(rect).astype(np.int32)
+
+        # If class_colors is provided, use it to color the boxes by class_id
+        color = class_colors.get(class_id, (0, 255, 0)) if class_colors else (0, 255, 0)  # Default: green
+        cv2.drawContours(bev_image, [box_pts], 0, color, 2)  # Draw the contour (bounding box)
+
+    return bev_image
+
 class LidarPreprocessorUtils:
     
     def transform_lidar_points(self, point_cloud_array:np.array, calibration_dict:dict):
@@ -182,7 +223,43 @@ class LidarPreprocessorUtils:
             }            
             
 
-        return valid_lidar_points_dict    
+        return valid_lidar_points_dict
+    
+    def transform_camera_to_lidar_box3d(self, bboxes_3d:list, calibration_dict:dict):        
+        
+        bboxes_lidar = []
+        
+        r0_rect = calibration_dict['R0_rect'].reshape(3,3) #(3,3)
+        r0_inv = np.linalg.inv(r0_rect)
+        
+        # reshaping Tr_velo_to_cam from (12,) to (3,4)
+        v2c = calibration_dict['Tr_velo_to_cam'].reshape(3,4)
+        v2c = np.vstack(
+            (v2c, [0, 0, 0, 1])
+        ) #(4,4)    
+        
+        c2v = np.linalg.inv(v2c)
+        
+        for box in bboxes_3d:
+            h, w, l, x_cam, y_cam, z_cam, ry, dist_to_cam = box
+            
+            # step 1: Convert center from rectified camera to LiDAR coordinates
+            xyz_cam_rect = np.array([x_cam, y_cam, z_cam])
+            xyz_cam = r0_inv @ xyz_cam_rect
+            xyz_cam_hom = np.append(xyz_cam, 1) #Make it 4D homogeneous 
+            
+            xyz_lidar = c2v @ xyz_cam_hom
+            x_l, y_l, z_l = xyz_lidar[:3]
+            
+            # step 2: Convert ry (camera yaw) to rz (LiDAR yaw)
+            rz = -ry - np.pi / 2
+            #Normalize rz to [-pi, pi]
+            rz = (rz + np.pi) % (2 * np.pi) - np.pi
+
+            # Reorder dimensions: [x, y, z, w, l, h, rz]
+            bboxes_lidar.append([x_l, y_l, z_l, w, l, h, rz])
+            
+        return np.array(bboxes_lidar)
 
 class Kitti2DObjectDetectDataset(Dataset):
     
@@ -198,7 +275,6 @@ class Kitti2DObjectDetectDataset(Dataset):
                         
         if not bool(self.left_image_dir) and not bool(self.right_image_dir):
             raise Exception(f'Both Left and Right Images cannot be {self.left_image_dir}')
-            
             
         self.calibration_dir = calibration_dir
         self.lidar_dir = lidar_dir
@@ -686,7 +762,7 @@ class KittiLidarFusionCollateFn(object):
 class KittiMLSFCollateFn(object):
     
     def __init__(self, image_resize:list, detection_head:str,
-                original_size:tuple=(375, 1242),
+                original_size:tuple=(375, 1242), lidar_map_type:str='depth_map',
                 transformation=None, apply_augmentation=False):
         
         self.image_resize = image_resize
@@ -698,21 +774,9 @@ class KittiMLSFCollateFn(object):
         
         self.resized_width = self.image_resize[1]
         self.resized_height = self.image_resize[0]
-        
-        #BEV Properties
-        self.bev_x_min = -20 
-        self.bev_x_max = 20 
-        
-        self.bev_y_min = -20 
-        self.bev_y_max = 20 
-        
-        self.bev_z_min = -20
-        self.bev_z_max = 20       
-        
-        self.bev_grid_x_res = (self.bev_x_max - self.bev_x_min)/self.resized_width
-        self.bev_grid_y_res = (self.bev_y_max - self.bev_y_min)/self.resized_height 
-        
+                
         self.apply_augmentation = apply_augmentation
+        self.lidar_map_type = lidar_map_type
 
         if transformation is None:
             self.transformation = albumentations.Compose(
@@ -732,10 +796,33 @@ class KittiMLSFCollateFn(object):
             self.image_only_transformation = albumentations.Compose(
                 [albumentations.Resize(height=self.resized_height, width=self.resized_width, always_apply=True)]
             )
-        
+
+        # Front side (of vehicle) Point Cloud boundary for BEV
+        self.boundary_front = {
+            "minX": 0,
+            "maxX": 70,
+            "minY": -50,
+            "maxY": 50,
+            "minZ": -2.73,
+            "maxZ": 1.27
+        }
+
+        self.bev_grid_x_res = (self.boundary_front['maxX'] - self.boundary_front['minX'])/self.resized_width
+        self.bev_grid_y_res = (self.boundary_front['maxY'] - self.boundary_front['minY'])/self.resized_height
+
+        # Back back (of vehicle) Point Cloud boundary for BEV
+        self.boundary_back = {
+            "minX": -50,
+            "maxX": 0,
+            "minY": -25,
+            "maxY": 25,
+            "minZ": -2.73,
+            "maxZ": 1.27
+        }        
+
     def read_calibration_file(self, calib_file_path):
+
         calibration_dict = {}
-        
         with open(calib_file_path, 'r') as f:
             for line in f.readlines():
                 if line != '\n':
@@ -769,7 +856,8 @@ class KittiMLSFCollateFn(object):
 
         '''
         class_labels = []
-        bboxes = []
+        bboxes_2d = []
+        bboxes_3d = []
         
         with open(label_file_path, 'r') as file:
             for line in file:                
@@ -784,11 +872,27 @@ class KittiMLSFCollateFn(object):
                 elif obj_type not in Enums.KiTTi_label2Id:
                     continue  # Skip invalid object types
 
-                # Bounding box coordinates
+                # 2D Bounding box coordinates
+                # ⚠️ KITTI defines height along the Y-axis, width along X, and length along Z in camera coordinates.
                 left = float(parts[4])  # left
                 top = float(parts[5])  # top
                 right = float(parts[6])  # right
-                bottom = float(parts[7])  # bottom
+                bottom = float(parts[7])  # bottom            
+                
+                # 3D Bounding Box Coordinates
+                h = float(parts[8]) #(in meters, vertical dimension)
+                w = float(parts[9]) #(lateral dimension)
+                l = float(parts[10]) #(along vehicle/driving direction)
+                
+                # 3D center of the object in camera coordinate space
+                # x – left/right; y – vertical; z – depth (forward from camera
+                t = float(parts[11]), float(parts[12]), float(parts[13])
+                
+                # Euclidean distance from the camera center to the 3D object center.
+                dist_to_cam = np.linalg.norm(t)
+                
+                # rotation angle ry of the object in camera coordinates
+                ry = float(parts[14])
 
                 if self.detection_head == 'yolo':
                     class_id = Enums.KiTTi_label2Id[obj_type]
@@ -796,9 +900,12 @@ class KittiMLSFCollateFn(object):
                     class_id = Enums.KiTTi_label2Id_SSD[obj_type]
                 
                 class_labels.append(class_id)
-                bboxes.append([left, top, right, bottom])
+                bboxes_2d.append([left, top, right, bottom])
+                
+                #TODO, rearrange
+                bboxes_3d.append([h, w, l, t[0], t[1], t[2], ry, dist_to_cam])
                            
-        return class_labels, bboxes         
+        return class_labels, bboxes_2d, bboxes_3d 
 
     def transform_sample(self, image:np.array, label_bboxes:np.array=None, class_labels:np.array=None):                        
         
@@ -814,7 +921,7 @@ class KittiMLSFCollateFn(object):
         
         return transformed_dict
     
-    def prepare_targets(self, batch_idx:int, class_labels:list, class_bboxes:list, letter_box:bool=True):
+    def prepare_targets_2d(self, batch_idx:int, class_labels:list, class_bboxes:list, letter_box:bool=True):
 
         targets = []
         for bbox, class_id in zip(class_bboxes, class_labels):        
@@ -829,8 +936,37 @@ class KittiMLSFCollateFn(object):
                 batch_idx, class_id, x_center, y_center, width, height
             ])
 
-        return targets     
+        return targets
     
+    def prepare_targets_3d(self, batch_idx: int, class_labels: list, class_bboxes: list):
+        
+        targets = []
+        for bbox, class_id in zip(class_bboxes, class_labels):
+            x_l, y_l, z_l, w, l, h, yaw = bbox[:]
+
+            # Slight adjustment for small objects
+            l = l + 0.3
+            w = w + 0.3
+
+            # Reverse yaw to align with LiDAR coordinate frame
+            yaw = (2 * np.pi - yaw) % (2 * np.pi)
+
+            if (x_l > self.boundary_front['minX']) and (x_l < self.boundary_front['maxX']) and \
+            (y_l > self.boundary_front['minY']) and (y_l < self.boundary_front['maxY']):
+
+                x_l = (x_l - self.boundary_front['minX']) / (self.boundary_front['maxX'] - self.boundary_front['minX'])
+                y_l = (y_l - self.boundary_front['minY']) / (self.boundary_front['maxY'] - self.boundary_front['minY'])
+
+                w = w / (self.boundary_front['maxY'] - self.boundary_front['minY'])
+                l = l / (self.boundary_front['maxX'] - self.boundary_front['minX'])
+
+                sin_yaw = np.sin(yaw)
+                cos_yaw = np.cos(yaw)
+
+                targets.append([batch_idx, class_id, y_l, x_l, w, l, sin_yaw, cos_yaw])
+
+        return targets
+
     def lidar_to_depth_map(self, lidar_point_cloud:np.array):
         
         # Euclidean distance of the point from lidar sensor mounted on car
@@ -876,83 +1012,74 @@ class KittiMLSFCollateFn(object):
         depth_map_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)                
         depth_map_colored = cv2.applyColorMap(depth_map_normalized.astype(np.uint8), cv2.COLORMAP_JET)
         depth_map_colored = cv2.cvtColor(depth_map_colored, cv2.COLOR_BGR2RGB)
-        
+
         return depth_map_colored   
     
-    def generate_bev_map(self, lidar_point_cloud:np.array):
-        
-        height_map = np.zeros((
-            self.resized_height, self.resized_width
-        ), dtype=np.float32)
-        
-        density_map = np.zeros((
-            self.resized_height, self.resized_width
-        ), dtype=np.float32)
-        
-        intensity_map = np.zeros((
-            self.resized_height, self.resized_width
-        ), dtype=np.float32)
-        
-        count_map = np.zeros((
-            self.resized_height, self.resized_width
-        ), dtype=np.float32)                        
-        
-        bev_map = np.zeros((
-            self.resized_height,
-            self.resized_width
-        ), dtype=np.uint8)
-        
-        mask = (lidar_point_cloud[:, 0] > self.bev_x_min) & (lidar_point_cloud[:, 0] < self.bev_x_max) & \
-               (lidar_point_cloud[:, 1] > self.bev_y_min) & (lidar_point_cloud[:, 1] < self.bev_y_max) & \
-               (lidar_point_cloud[:, 2] > self.bev_z_min) & (lidar_point_cloud[:, 1] < self.bev_z_max)
-               
+    def generate_bev_map(self, lidar_point_cloud: np.array):
+        height_map = np.zeros((self.resized_height, self.resized_width), dtype=np.float32)
+        density_map = np.zeros((self.resized_height, self.resized_width), dtype=np.float32)
+        intensity_map = np.zeros((self.resized_height, self.resized_width), dtype=np.float32)
+        count_map = np.zeros((self.resized_height, self.resized_width), dtype=np.float32)
+
+        # Boundary filtering (fix z-axis condition bug)
+        mask = (
+            (lidar_point_cloud[:, 0] > self.boundary_front['minX']) & (lidar_point_cloud[:, 0] < self.boundary_front['maxX']) &
+            (lidar_point_cloud[:, 1] > self.boundary_front['minY']) & (lidar_point_cloud[:, 1] < self.boundary_front['maxY']) &
+            (lidar_point_cloud[:, 2] > self.boundary_front['minZ']) & (lidar_point_cloud[:, 2] < self.boundary_front['maxZ'])
+        )
         lidar_point_cloud = lidar_point_cloud[mask]
-        
+
         # Convert x, y to BEV coordinates
-        x_idx = ((lidar_point_cloud[:, 0] - self.bev_x_min) / self.bev_grid_x_res).astype(np.int32)
-        y_idx = ((lidar_point_cloud[:, 1] - self.bev_y_min) / self.bev_grid_y_res).astype(np.int32)
+        x_idx = ((lidar_point_cloud[:, 0] - self.boundary_front['minX']) / self.bev_grid_x_res).astype(np.int32)
+        y_idx = ((lidar_point_cloud[:, 1] - self.boundary_front['minY']) / self.bev_grid_y_res).astype(np.int32)
 
-        # Assign values to height, intensity, and density maps
+        # Sort: for top-point filtering (same as lexsort logic)
+        sort_indices = np.lexsort((
+            -lidar_point_cloud[:, 2],  # descending height
+            y_idx,
+            x_idx
+        ))
+        lidar_point_cloud = lidar_point_cloud[sort_indices]
+        x_idx = x_idx[sort_indices]
+        y_idx = y_idx[sort_indices]
+
+        # Use unique (x, y) to retain only top-most points
+        coords = x_idx * self.resized_width + y_idx
+        _, unique_indices = np.unique(coords, return_index=True)
+        top_points = lidar_point_cloud[unique_indices]
+        top_x = x_idx[unique_indices]
+        top_y = y_idx[unique_indices]
+
+        # Height map: normalized to [0, 1]
+        height_map[top_y, top_x] = (top_points[:, 2] - self.boundary_front['minZ']) / (self.boundary_front['maxZ'] - self.boundary_front['minZ'])
+
+        # Intensity map: raw intensity from top points
+        intensity_map[top_y, top_x] = top_points[:, 3]
+
+        # Count map for density
         for i in range(lidar_point_cloud.shape[0]):
-            xi, yi = x_idx[i], y_idx[i]
-            
-            # Height Map (Red Channel) - Normalize Z between 0 and 255
-            height_map[yi, xi] = max(height_map[yi, xi], lidar_point_cloud[i, 2])  
-            
-            # Intensity Map (Blue Channel) - Average intensity
-            intensity_map[yi, xi] += lidar_point_cloud[i, 3]
-            
-            # Count the number of points per cell
-            count_map[yi, xi] += 1  
+            count_map[y_idx[i], x_idx[i]] += 1
 
-        # Normalize height to 0-255
-        height_map = ((height_map - self.bev_z_min) / (self.bev_z_max - self.bev_z_min) * 255).astype(np.uint8)
+        # Log-normalized density
+        density_map = np.minimum(1.0, np.log1p(count_map) / np.log(64))
 
-        # Compute average intensity per pixel
-        intensity_map[count_map > 0] /= count_map[count_map > 0]
-        intensity_map = (intensity_map * 255).astype(np.uint8)
+        # Final BEV map: [intensity, height, density] → channel-first (C, H, W)
+        bev_map = np.stack([
+            intensity_map[:self.resized_height, :self.resized_width],
+            height_map[:self.resized_height, :self.resized_width],
+            density_map[:self.resized_height, :self.resized_width]
+        ], axis=0).astype(np.float32)
 
-        # Compute density map (log-normalized count)
-        density_map = np.log1p(count_map) / np.log1p(np.max(count_map))
-        density_map = (density_map * 255).astype(np.uint8)
-
-        # Stack the three channels
-        bev_image = np.stack([height_map, density_map, intensity_map], axis=-1)  
-
-        # Normalize and apply colormap
-        bev_map_normalized = cv2.normalize(bev_image, None, 0, 255, cv2.NORM_MINMAX)                
-        bev_map_colored = cv2.applyColorMap(bev_map_normalized.astype(np.uint8), cv2.COLORMAP_JET)
-        bev_map_colored = cv2.cvtColor(bev_map_colored, cv2.COLOR_BGR2RGB)
-        
-        return bev_map_colored   
+        return bev_map  # shape: (3, H, W)
     
     def __call__(self, batch_data_filepaths:List[Dict]):
         
         batch_data_items = {
             'images':[],
             "image_paths":[],
-            'lidar_depth_2d':[],
-            "targets": []
+            'lidar_2d':[],
+            "targets": [],
+            "targets_3d":[]
         }
         
         for idx, file_path_dict in enumerate(batch_data_filepaths):
@@ -976,32 +1103,60 @@ class KittiMLSFCollateFn(object):
             
             if os.path.exists(lidar_file_path):
                 lidar_point_cloud = np.fromfile(lidar_file_path, dtype=np.float32).reshape(-1, 4)
-                lidar_map = self.lidar_to_depth_map(lidar_point_cloud)
-                # lidar_map = self.generate_bev_map(lidar_point_cloud)
-                                
+                
+                if self.lidar_map_type == 'depth_map':
+                    lidar_map = self.lidar_to_depth_map(lidar_point_cloud)
+                elif self.lidar_map_type == 'bev_map':
+                    lidar_map = self.generate_bev_map(lidar_point_cloud)
+
             else:
                 print(f'Lidar {lidar_file_path} Does not Exist!')
                 exit(1)
                 
+            if os.path.exists(calibration_file_path):
+                calibration_dict = self.read_calibration_file(calibration_file_path)
+            else:
+                print(f'Calib {calibration_file_path} Does not Exist!')                
+
             if label_file_path is not None:
                 if os.path.exists(label_file_path):
-                    class_labels, label_bboxes = self.read_label_file(label_file_path)                    
+                    class_labels, label_bboxes_2d, label_bboxes_3d = self.read_label_file(label_file_path)                    
+                    
+                    targets_3d = LidarPreprocessorUtils().transform_camera_to_lidar_box3d(
+                        label_bboxes_3d, calibration_dict
+                    )                    
+
+                    # [batch_idx, class_id, y_l, x_l, w, l, sin_yaw, cos_yaw]
+                    targets_3d = self.prepare_targets_3d(idx, class_labels, targets_3d)
+                    
+                    # bev_image = draw_bev_with_boxes(lidar_map, targets_3d, self.boundary_front, 
+                    #                 self.bev_grid_x_res, self.bev_grid_y_res)
+                    
+                    
+                    # cv2.imwrite("bev_with_boxes.png", bev_image)
+                    # exit(1)
                     
                     #left_image_arr : (375, 1242, 3)                 
                     transformed_dict = self.transform_sample(
-                        left_image_arr, label_bboxes, class_labels
-                    )                                    
+                        left_image_arr, label_bboxes_2d, class_labels
+                    )
                     
-                    targets = self.prepare_targets(
+                    targets = self.prepare_targets_2d(
                         idx, transformed_dict['class_labels'], transformed_dict['bboxes']
                     ) #prepared targets within (0 to 1) normalized, with image_resize
 
                     batch_data_items['targets'].append(
                         torch.tensor(targets, dtype=torch.float32)
-                    )                    
+                    )
+                    
+                    batch_data_items['targets_3d'].append(
+                        torch.tensor(targets_3d, dtype=torch.float32)
+                    )
                     
                     left_image = transformed_dict['image']
-                    lidar_map = self.transform_sample(lidar_map)['image']
+
+                    if self.lidar_map_type == 'depth_map':
+                        lidar_map = self.transform_sample(lidar_map)['image']
                     
                 else:
                     print(f'Label File Path not found!!')
@@ -1015,22 +1170,30 @@ class KittiMLSFCollateFn(object):
                 lidar_map = self.transform_sample(lidar_map)['image']
             
             image_tensor = torch.from_numpy(left_image).permute((2, 0, 1)) #(nc, h, w)
-            lidar_map_tensor = torch.from_numpy(lidar_map).permute((2, 0, 1)) #(nc, h, w)  
+            
+            if self.lidar_map_type == 'depth_map':
+                lidar_map_tensor = torch.from_numpy(lidar_map).permute((2, 0, 1)) #(nc, h, w)
+            elif self.lidar_map_type == 'bev_map':
+                lidar_map_tensor = torch.from_numpy(lidar_map) #(nc, h, w)
                                     
             batch_data_items['images'].append(image_tensor)
-            batch_data_items['lidar_depth_2d'].append(lidar_map_tensor)
-                                
+            batch_data_items['lidar_2d'].append(lidar_map_tensor)
+
         batch_data_items['images'] = torch.stack(
             batch_data_items['images'], dim=0
         ).float()
         
-        batch_data_items['lidar_depth_2d'] = torch.stack(
-            batch_data_items['lidar_depth_2d'], dim=0
+        batch_data_items['lidar_2d'] = torch.stack(
+            batch_data_items['lidar_2d'], dim=0
         ).float()     
         
         if batch_data_items['targets']:
             batch_data_items['targets'] = torch.concat(
                 batch_data_items['targets'], dim=0
+            )
+
+            batch_data_items['targets_3d'] = torch.concat(
+                batch_data_items['targets_3d'], dim=0
             )            
         
         return batch_data_items
@@ -1119,8 +1282,8 @@ class KitiiMLSFCollateAugment(KittiMLSFCollateFn):
         batch_data_items = {
             'images':[],
             "image_paths":[],
-            'lidar_depth_2d':[],
-            'augmented_lidar_depth_2d':[],
+            'lidar_2d':[],
+            'augmented_lidar_2d':[],
             "targets": []
         }
         
@@ -1160,15 +1323,15 @@ class KitiiMLSFCollateAugment(KittiMLSFCollateFn):
             if label_file_path is not None:
                 if os.path.exists(label_file_path):
                     class_labels, label_bboxes = self.read_label_file(label_file_path)                    
-                    
+
                     #left_image_arr : (375, 1242, 3)                 
                     transformed_dict = self.transform_sample(
                         left_image_arr, label_bboxes, class_labels
                     )
 
-                    targets = self.prepare_targets(
+                    targets = self.prepare_targets_2d(
                         idx, transformed_dict['class_labels'], transformed_dict['bboxes']
-                    )                                                      
+                    )
 
                     batch_data_items['targets'].append(
                         torch.tensor(targets, dtype=torch.float32)
@@ -1188,19 +1351,19 @@ class KitiiMLSFCollateAugment(KittiMLSFCollateFn):
             augmented_depth_map_tensor = torch.from_numpy(augmented_depth_map).permute((2, 0, 1)) #(nc, h, w)  
 
             batch_data_items['images'].append(image_tensor)
-            batch_data_items['lidar_depth_2d'].append(clean_depth_map_tensor)
-            batch_data_items['augmented_lidar_depth_2d'].append(augmented_depth_map_tensor)
+            batch_data_items['lidar_2d'].append(clean_depth_map_tensor)
+            batch_data_items['augmented_lidar_2d'].append(augmented_depth_map_tensor)
 
         batch_data_items['images'] = torch.stack(
             batch_data_items['images'], dim=0
         ).float()
 
-        batch_data_items['lidar_depth_2d'] = torch.stack(
-            batch_data_items['lidar_depth_2d'], dim=0
+        batch_data_items['lidar_2d'] = torch.stack(
+            batch_data_items['lidar_2d'], dim=0
         ).float()     
 
-        batch_data_items['augmented_lidar_depth_2d'] = torch.stack(
-            batch_data_items['augmented_lidar_depth_2d'], dim=0
+        batch_data_items['augmented_lidar_2d'] = torch.stack(
+            batch_data_items['augmented_lidar_2d'], dim=0
         ).float()
 
         if batch_data_items['targets']:
