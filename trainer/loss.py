@@ -1,7 +1,10 @@
 import math
+from typing import Iterable
 
 import torch
 import torch.nn as nn
+import numpy as np
+from shapely.geometry import Polygon
 
 def to_cpu(tensor):
     return tensor.detach().cpu()
@@ -133,7 +136,7 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False,
                 # Hot one class encoding
                 t = torch.zeros_like(ps[:, 5:], device=device)  # targets
                 t[range(num_targets), tcls[layer_index]] = 1
-                
+
                 if cls_loss_type == "focal":
                     lcls += focal_loss(ps[:, 5:], t, alpha=0.25, gamma=2.0, reduction="mean")
                 elif cls_loss_type == "bce":
@@ -157,12 +160,11 @@ def compute_loss(predictions, targets, model, eval_debug:bool=False,
     if eval_debug:
         # print(f'lbox + lobj + lcls: {lbox} + {lobj} + {lcls}')
         pass
-        
+
     # Merge losses
     loss = lbox + lobj + lcls
 
     return loss, to_cpu(torch.cat((lbox, lobj, lcls, loss)))
-
 
 def build_targets(p, targets, model, model_type:str='yolov3'):
     # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
@@ -259,4 +261,178 @@ def feature_alignment_loss(yolo_feat:torch.tensor, lidar_feat:torch.tensor):
     
     structure_loss = torch.nn.functional.mse_loss(yolo_structure, point_structure)
     
-    return mean_loss + 0.1 * cov_loss + 0.1 * structure_loss  
+    return mean_loss + 0.1 * cov_loss + 0.1 * structure_loss
+
+def build_targets_3d(pred_boxes, pred_cls, target, anchors, ignore_thres):
+
+    ByteTensor = torch.cuda.ByteTensor if pred_boxes.is_cuda else torch.ByteTensor
+    FloatTensor = torch.cuda.FloatTensor if pred_boxes.is_cuda else torch.ByteTensor
+
+    nB = pred_boxes.size(0)
+    nA = pred_boxes.size(1)
+    nC = pred_cls.size(-1)
+    nG = pred_boxes.size(2)
+    
+    device = pred_boxes.device
+
+    # Output tensors
+    obj_mask = ByteTensor(nB, nA, nG, nG).fill_(0).to(device)
+    noobj_mask = ByteTensor(nB, nA, nG, nG).fill_(1).to(device)
+    class_mask = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    iou_scores = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    tx = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    ty = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    tw = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    th = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    tim = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    tre = FloatTensor(nB, nA, nG, nG).fill_(0).to(device)
+    tcls = FloatTensor(nB, nA, nG, nG, nC).fill_(0).to(device)
+
+    # Convert to position relative to box
+    target_boxes = target[:, 2:8]
+    
+    gxy = target_boxes[:, :2] * nG
+    gwh = target_boxes[:, 2:4] * nG
+    gimre = target_boxes[:, 4:]
+
+    # Get anchors with best iou
+    ious = torch.stack([rotated_box_wh_iou_polygon(anchor, gwh, gimre) for anchor in anchors])    
+
+    best_ious, best_n = ious.max(0)
+    b, target_labels = target[:, :2].long().t()
+    
+    gx, gy = gxy.t()
+    gw, gh = gwh.t()
+    gim, gre = gimre.t()
+    gi, gj = gxy.long().t()
+    # Set masks
+    obj_mask[b, best_n, gj, gi] = 1
+    noobj_mask[b, best_n, gj, gi] = 0
+
+    # Set noobj mask to zero where iou exceeds ignore threshold
+    for i, anchor_ious in enumerate(ious.t()):
+        noobj_mask[b[i], anchor_ious > ignore_thres, gj[i], gi[i]] = 0
+
+    # Coordinates
+    tx[b, best_n, gj, gi] = gx - gx.floor()
+    ty[b, best_n, gj, gi] = gy - gy.floor()
+    # Width and height
+    tw[b, best_n, gj, gi] = torch.log(gw / anchors[best_n][:, 0] + 1e-16)
+    th[b, best_n, gj, gi] = torch.log(gh / anchors[best_n][:, 1] + 1e-16)
+    # Im and real part 
+    tim[b, best_n, gj, gi] = gim
+    tre[b, best_n, gj, gi] = gre
+
+    # One-hot encoding of label
+    tcls[b, best_n, gj, gi, target_labels] = 1
+    # Compute label correctness and iou at best anchor
+    class_mask[b, best_n, gj, gi] = (pred_cls[b, best_n, gj, gi].argmax(-1) == target_labels).float()
+
+    rotated_iou_scores = rotated_box_11_iou_polygon(pred_boxes[b, best_n, gj, gi], target_boxes, nG)
+    iou_scores[b, best_n, gj, gi] = rotated_iou_scores.to(device)
+     
+    tconf = obj_mask.float()
+    return iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tim, tre, tcls, tconf
+
+def convert_format(boxes_array):
+    """
+    :param array: an array of shape [# bboxs, 4, 2]
+    :return: a shapely.geometry.Polygon object
+    """
+    polygons = [Polygon([(box[i, 0], box[i, 1]) for i in range(4)]) for box in boxes_array]
+    return np.array(polygons)
+
+def compute_iou(box, boxes):
+    """Calculates IoU of the given box with the array of the given boxes.
+    box: a polygon
+    boxes: a vector of polygons
+    Note: the areas are passed in rather than calculated here for
+    efficiency. Calculate once in the caller to avoid duplicate work.
+    """
+    # Calculate intersection areas
+    iou = [box.intersection(b).area / (box.union(b).area + 1e-12) for b in boxes]
+
+    return np.array(iou, dtype=np.float32)
+
+# bev image coordinates format
+def get_corners(x, y, w, l, yaw):
+    bev_corners = np.zeros((4, 2), dtype=np.float32)
+
+    # front left
+    bev_corners[0, 0] = x - w / 2 * np.cos(yaw) - l / 2 * np.sin(yaw)
+    bev_corners[0, 1] = y - w / 2 * np.sin(yaw) + l / 2 * np.cos(yaw)
+
+    # rear left
+    bev_corners[1, 0] = x - w / 2 * np.cos(yaw) + l / 2 * np.sin(yaw)
+    bev_corners[1, 1] = y - w / 2 * np.sin(yaw) - l / 2 * np.cos(yaw)
+
+    # rear right
+    bev_corners[2, 0] = x + w / 2 * np.cos(yaw) + l / 2 * np.sin(yaw)
+    bev_corners[2, 1] = y + w / 2 * np.sin(yaw) - l / 2 * np.cos(yaw)
+
+    # front right
+    bev_corners[3, 0] = x + w / 2 * np.cos(yaw) - l / 2 * np.sin(yaw)
+    bev_corners[3, 1] = y + w / 2 * np.sin(yaw) + l / 2 * np.cos(yaw)
+
+    return bev_corners
+        
+def rotated_bbox_iou_polygon(box1, box2):
+    box1 = to_cpu(box1).numpy()
+    box2 = to_cpu(box2).numpy()
+
+    x,y,w,l,im,re = box1
+    angle = np.arctan2(im, re)
+    bbox1 = np.array(get_corners(x, y, w, l, angle)).reshape(-1,4,2)
+    bbox1 = convert_format(bbox1)
+
+    bbox2 = []
+    for i in range(box2.shape[0]):
+        x,y,w,l,im,re = box2[i,:]
+        angle = np.arctan2(im, re)
+        bev_corners = get_corners(x, y, w, l, angle)
+        bbox2.append(bev_corners)
+    bbox2 = convert_format(np.array(bbox2))
+
+    return compute_iou(bbox1[0], bbox2)        
+        
+def rotated_box_wh_iou_polygon(anchor, wh, imre):
+    w1, h1, im1, re1 = anchor[0], anchor[1], anchor[2], anchor[3]
+
+    wh = wh.t()
+    imre = imre.t()
+    w2, h2, im2, re2 = wh[0], wh[1], imre[0], imre[1]
+
+    anchor_box = torch.cuda.FloatTensor([100, 100, w1, h1, im1, re1]).view(-1, 6)    
+    target_boxes = torch.cuda.FloatTensor(w2.shape[0], 6).fill_(100)
+
+    target_boxes[:, 2] = w2
+    target_boxes[:, 3] = h2
+    target_boxes[:, 4] = im2
+    target_boxes[:, 5] = re2
+
+    ious = rotated_bbox_iou_polygon(anchor_box[0], target_boxes)
+
+    return torch.from_numpy(ious)            
+
+def rotated_box_11_iou_polygon(box1, box2, nG):
+
+    box1_new = torch.cuda.FloatTensor(box1.shape[0], 6).fill_(0)
+    box2_new = torch.cuda.FloatTensor(box2.shape[0], 6).fill_(0)
+
+    box1_new[:, :4] = box1[:, :4]
+    box1_new[:, 4:] = box1[:, 4:]
+
+    box2_new[:, :4] = box2[:, :4] * nG
+    box2_new[:, 4:] = box2[:, 4:]
+
+    ious = []
+    for i in range(box1_new.shape[0]):
+        bbox1 = box1_new[i]
+        bbox2 = box2_new[i].view(-1, 6)
+
+        iou = rotated_bbox_iou_polygon(bbox1, bbox2).squeeze()
+        ious.append(iou)
+
+    ious = np.array(ious)
+
+    return torch.from_numpy(ious)
