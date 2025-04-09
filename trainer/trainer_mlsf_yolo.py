@@ -2,6 +2,7 @@ import os, math, time, random
 from tqdm import tqdm
 import torch, torchvision
 from typing import Iterable, Union
+from collections import defaultdict
 from terminaltables import AsciiTable
 import numpy as np
 
@@ -103,7 +104,7 @@ class MLSFTrainerYolo:
             
     def _init_dataloader(self, dataset_kwargs:dict):
         
-        def create_dataloader(kwargs:dict, image_resize:tuple, return_augment_loader:bool=False):
+        def create_dataloader(kwargs:dict, image_resize:tuple, lidar_map_type:str, return_augment_loader:bool=False):
             dataset = Kitti2DObjectDetectDataset(
                 lidar_dir=kwargs['lidar_dir'],
                 calibration_dir=kwargs['calibration_dir'],
@@ -118,7 +119,7 @@ class MLSFTrainerYolo:
                     batch_size=kwargs['batch_size'], 
                     collate_fn=KitiiMLSFCollateAugment(
                         image_resize=image_resize,
-                        detection_head='yolo'
+                        detection_head='yolo'                        
                     ),
                     shuffle=True
                 )
@@ -128,7 +129,8 @@ class MLSFTrainerYolo:
                     batch_size=kwargs['batch_size'], 
                     collate_fn=KittiMLSFCollateFn(
                         image_resize=image_resize,
-                        detection_head='yolo'
+                        detection_head='yolo', 
+                        lidar_map_type=lidar_map_type
                     ),
                     shuffle=True
                 )
@@ -137,7 +139,10 @@ class MLSFTrainerYolo:
         
         if dataset_kwargs['kitti_trainer_dataset_kwargs']:
             self.train_dataloader = create_dataloader(
-                dataset_kwargs['kitti_trainer_dataset_kwargs'], tuple(dataset_kwargs['image_resize']), return_augment_loader=self.modality_corrupt
+                dataset_kwargs['kitti_trainer_dataset_kwargs'], 
+                tuple(dataset_kwargs['image_resize']), 
+                dataset_kwargs['lidar_map_type'],
+                return_augment_loader=self.modality_corrupt
             )                    
             self.train_batch_size = self.train_dataloader.batch_size
             
@@ -150,7 +155,9 @@ class MLSFTrainerYolo:
         
         if dataset_kwargs['kitti_validation_dataset_kwargs']:
             self.validation_dataloader = create_dataloader(
-                dataset_kwargs['kitti_validation_dataset_kwargs'], tuple(dataset_kwargs['image_resize'])
+                dataset_kwargs['kitti_validation_dataset_kwargs'], 
+                tuple(dataset_kwargs['image_resize']), 
+                dataset_kwargs['lidar_map_type'],
             )
             self.val_batch_size = self.validation_dataloader.batch_size
         else:
@@ -262,7 +269,8 @@ class MLSFTrainerYolo:
         ten_percent_batch_total_loss = 0
         
         epoch_training_time = 0.0
-        ten_percent_training_time = 0.0        
+        ten_percent_training_time = 0.0
+        ten_percent_metric_per_grid = defaultdict(lambda:defaultdict(int))
         
         train_iter = tqdm(self.train_dataloader, desc=f'Training Epoch: {self.cur_epoch}')
         for batch_idx, data_items in enumerate(train_iter):
@@ -273,14 +281,24 @@ class MLSFTrainerYolo:
             elif self.modality_corrupt and self.mlsf.use_lidar_backbone:
                 loss, loss_components = self.train_one_step_modality_corrupt(data_items)
             else:
-                loss, loss_components, outputs = self.train_one_step(data_items)            
+                #TODO, must be uniform return for 2D and 3D
+                loss, loss_components, outputs = self.train_one_step(data_items)                
+                for metrics in loss_components:
+                    grid_size = metrics['grid_size']
+                    ten_percent_metric_per_grid[grid_size]['precision'] += metrics['precision']
+                    ten_percent_metric_per_grid[grid_size]['cls_acc'] += metrics['cls_acc']
+                    ten_percent_metric_per_grid[grid_size]['recall50'] += metrics['recall50']
+                    ten_percent_metric_per_grid[grid_size]['recall75'] += metrics['recall75']
+                    # ten_percent_metric_per_grid[grid_size]['iou_scores'] += metrics['iou_scores']
+                    ten_percent_metric_per_grid[grid_size]['conf_obj'] += metrics['conf_obj']
+                    ten_percent_metric_per_grid[grid_size]['conf_noobj'] += metrics['conf_noobj']
 
             step_end_time = time.time()
             
             if ((batch_idx + 1) % self.gradient_accumulation_steps == 0) or (batch_idx == self.train_dataloader.__len__() - 1):                
 
                 self.optimizer.step()
-                self.lr_scheduler.step()
+                # self.lr_scheduler.step()
 
                 self.optimizer.zero_grad()                                            
 
@@ -298,9 +316,25 @@ class MLSFTrainerYolo:
 
                 message = f'Epoch {self.cur_epoch} - iter {batch_idx}/{self.total_train_batch} - total loss {average_loss:.4f} -- current_lr: {current_lr}'
                 self.logger.log_message(message=message)
+                self.logger.log_new_line()
+                
+                for grid_size in ten_percent_metric_per_grid:
+                    precision = ten_percent_metric_per_grid[grid_size]['precision']/self.total_train_batch
+                    cls_acc = ten_percent_metric_per_grid[grid_size]['cls_acc']/self.total_train_batch
+                    recall50 = ten_percent_metric_per_grid[grid_size]['recall50']/self.total_train_batch
+                    recall75 = ten_percent_metric_per_grid[grid_size]['recall75']/self.total_train_batch
+                    # iou_scores = ten_percent_metric_per_grid[grid_size]['iou_scores']/self.total_train_batch
+                    conf_obj = ten_percent_metric_per_grid[grid_size]['conf_obj']/self.total_train_batch
+                    conf_noobj = ten_percent_metric_per_grid[grid_size]['conf_noobj']/self.total_train_batch
+                
+                    metrics_log = f'GridSize: {grid_size} -- Cls Acc: {cls_acc:.4f} Precision: {precision:.4f} Recall50: {recall50:.4f} Recall75: {recall75:.4f} Conf Obj: {conf_obj:.4f} Conf NoObj: {conf_noobj:.4f}'
+                    self.logger.log_message(metrics_log)
+                    
+                self.logger.log_new_line()
 
                 ten_percent_batch_total_loss = 0
-                ten_percent_training_time = 0.0                                                                           
+                ten_percent_training_time = 0.0
+                ten_percent_metric_per_grid = defaultdict(lambda:defaultdict(int))
                 
         self.logger.log_message(
             f'Epoch {self.cur_epoch} - Average Loss {total_loss/self.total_train_batch:.4f} -- current_lr: {current_lr}'
@@ -313,8 +347,8 @@ class MLSFTrainerYolo:
         with torch.set_grad_enabled(True):
             loss, loss_components, outputs = self.mlsf(
                 data_items['images'],
-                data_items['lidar_depth_2d'] if self.mlsf.use_lidar_backbone else None,
-                data_items['targets'], 
+                data_items['lidar_2d'] if self.mlsf.use_lidar_backbone else None,
+                data_items['targets'], data_items['targets_3d'],
                 cls_loss_type="focal" if self.cur_epoch > 20 else 'bce'
             )
                       
@@ -336,7 +370,7 @@ class MLSFTrainerYolo:
             
             loss, loss_components, _ = self.mlsf(
                 data_items['images'],
-                data_items['lidar_depth_2d'] if self.mlsf.use_lidar_backbone else None,
+                data_items['lidar_2d'] if self.mlsf.use_lidar_backbone else None,
                 data_items['targets'], 
                 cls_loss_type="focal" if self.cur_epoch > 20 else 'bce'
             )
@@ -349,11 +383,11 @@ class MLSFTrainerYolo:
                 data_items['images'], 'SaltPapperNoise'
             )
             # else:
-            #     data_items['lidar_depth_2d'] = data_items['augmented_lidar_depth_2d']
+            #     data_items['lidar_2d'] = data_items['augmented_lidar_2d']
                 
             loss, loss_components, _ = self.mlsf(
                 data_items['images'],
-                data_items['lidar_depth_2d'] if self.mlsf.use_lidar_backbone else None,
+                data_items['lidar_2d'] if self.mlsf.use_lidar_backbone else None,
                 data_items['targets'], 
                 cls_loss_type="focal" if self.cur_epoch > 20 else 'bce'
             )
@@ -382,7 +416,7 @@ class MLSFTrainerYolo:
             # Image + LiDAR detection (Full Modality)
             loss, loss_components, _ = self.mlsf(
                 data_items['images'],
-                data_items['lidar_depth_2d'] if self.mlsf.use_lidar_backbone else None,
+                data_items['lidar_2d'] if self.mlsf.use_lidar_backbone else None,
                 data_items['targets'], 
                 cls_loss_type="focal" if self.cur_epoch > 20 else 'bce'
             )
@@ -393,7 +427,7 @@ class MLSFTrainerYolo:
 
             # Modality-Dropped Training Step
             image_input = data_items['images'] if random.random() > self.p_modality_dropout else None
-            lidar_input = data_items['lidar_depth_2d'] if (random.random() > self.p_modality_dropout and self.mlsf.use_lidar_backbone) else None
+            lidar_input = data_items['lidar_2d'] if (random.random() > self.p_modality_dropout and self.mlsf.use_lidar_backbone) else None
 
             # Ensure at least one modality is present
             if image_input is None and lidar_input is None:
@@ -478,8 +512,8 @@ class MLSFTrainerYolo:
             with torch.no_grad():
                 loss, loss_components, outputs = self.mlsf(
                     data_items['images'],
-                    data_items['lidar_depth_2d'] if self.mlsf.use_lidar_backbone else None,
-                    data_items['targets']
+                    data_items['lidar_2d'] if self.mlsf.use_lidar_backbone else None,
+                    data_items['targets'], data_items['targets_3d']
                 )                
                         
             total_eval_loss += loss.item()
@@ -491,7 +525,7 @@ class MLSFTrainerYolo:
             targets[:, 2:] *= img_size
 
             if type(self.mlsf) == MLSFYolo:
-                
+                #TODO, call respective activation based on task (2D or 3D)
                 anchor_grids = [yolo_layer.anchor_grid for yolo_layer in self.mlsf.image_backbone.yolo_layers]
                 outputs = apply_sigmoid_activation(outputs, data_items['images'].size(2), anchor_grids)                
             
