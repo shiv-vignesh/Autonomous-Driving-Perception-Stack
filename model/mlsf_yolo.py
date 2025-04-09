@@ -275,70 +275,88 @@ class MLSFYolo(torch.nn.Module):
 
             self.adaptive_fusion_module = torch.nn.ModuleDict(self.adaptive_fusion_module).to(self.adaptive_fusion_device)
             
-    def forward(self, images:torch.tensor, lidar_depth_2d:torch.tensor=None, 
-                targets:torch.tensor=None):
+    def forward(self, images:torch.tensor, lidar_2d:torch.tensor=None, 
+                targets:torch.tensor=None, targets_3d:torch.Tensor=None, 
+                tasks:list=["obj_3d"],cls_loss_type:str="focal"):
 
-        assert images is not None or lidar_depth_2d is not None, f"Both Modalities: images and lidar cannot be {images} {lidar_depth_2d}"
-        
+        assert images is not None or lidar_2d is not None, f"Both Modalities: images and lidar cannot be {images} {lidar_2d}"
+
         image_backbone_features = self.image_backbone.forward_backbone(
             images.to(self.image_backbone_device)
         ) if images is not None else None
-        
+
         lidar_2d_features = self.lidar_backbone.forward_backbone(
-            lidar_depth_2d.to(self.lidar_backbone_device)
-        ) if self.use_lidar_backbone and lidar_depth_2d is not None  else None
-                
+            lidar_2d.to(self.lidar_backbone_device)
+        ) if self.use_lidar_backbone and lidar_2d is not None  else None
+
         if self.apply_adaptive_fusion and lidar_2d_features is not None and image_backbone_features is not None:        
             fused_features_list = []
             for idx, (_, fusion_module) in enumerate(self.adaptive_fusion_module.items()):
                 image_feat, lidar_feat = fusion_module(image_backbone_features[idx].to(self.adaptive_fusion_device), 
                                             lidar_2d_features[idx].to(self.adaptive_fusion_device))
-                
+
                 fused_features = self.combine_features(image_feat, lidar_feat)
                 fused_features_list.append(fused_features.to(self.image_backbone_device))
 
         elif lidar_2d_features is not None and image_backbone_features is not None:
             fused_features_list = []
             for idx, (image_feat, lidar_feat) in enumerate(zip(image_backbone_features, lidar_2d_features)):
-                fused_features = self.combine_features(image_feat, lidar_feat)
+                fused_features = self.combine_features(image_feat, lidar_feat.to(image_feat.device))
                 fused_features_list.append(fused_features.to(self.image_backbone_device))
-                
+
         elif image_backbone_features is None:
             fused_features_list = []
             for idx, lidar_feat in enumerate(lidar_2d_features):
                 fused_features_list.append(lidar_feat.to(self.image_backbone_device))   
-                
+
         elif lidar_2d_features is None:
             fused_features_list = []
             for idx, image_feat in enumerate(image_backbone_features):
                 fused_features_list.append(image_feat.to(self.image_backbone_device))
-        
-        outputs = self.image_backbone.forward_detection_head(
-            fused_features_list, images.shape[2] if images is not None else lidar_depth_2d.shape[2]
-        )
-        
+
         loss_components = {}
         total_loss = 0.0
         
-        if targets is not None:
-            if not self.training:
-                num_anchors = 3            
-                for i, x in enumerate(outputs):
-                    bs, num_preds, _ = x.shape
-                    grid_size = int(math.sqrt(num_preds // num_anchors))
-                    outputs[i] = x.view(bs, num_anchors, grid_size, grid_size, -1)
-            
-            total_loss, loss_components = compute_loss(outputs,
-                                                targets.to(self.image_backbone_device), 
-                                                self.image_backbone, cls_loss_type='focal')
+        #TODO, replace with lidar_backbone or image_backbone for multi-task training
+        if "obj_3d" in tasks:
+            if self.lidar_backbone.has_3d_head:
+                outputs, total_loss, metrics_all = self.lidar_backbone.forward_detection_head_3d(
+                    lidar_2d_features, 
+                    lidar_2d.shape[2] if images is not None else lidar_2d.shape[2], 
+                    targets_3d.to(self.lidar_backbone_device)
+                    
+                )
 
-            loss_components = {
-                        'lbox':loss_components[0].item(), 
-                        'lobj':loss_components[1].item(),
-                        'lcls':loss_components[2].item()
-                        }
+            # if targets_3d is not None:
+            #     total_loss, metrics_all = compute_loss_3d(
+            #         outputs, targets_3d.to(self.lidar_backbone_device), self.lidar_backbone
+            #     )
+                
+            return total_loss, metrics_all, outputs
 
-        return total_loss, loss_components, outputs
+        if "obj_2d" in tasks:
+            outputs = self.image_backbone.forward_detection_head(
+                fused_features_list, images.shape[2] if images is not None else lidar_2d.shape[2]
+            )            
+            if targets is not None:
+                if not self.training:
+                    num_anchors = 3            
+                    for i, x in enumerate(outputs):
+                        bs, num_preds, _ = x.shape
+                        grid_size = int(math.sqrt(num_preds // num_anchors))
+                        outputs[i] = x.view(bs, num_anchors, grid_size, grid_size, -1)            
+
+                total_loss, loss_components = compute_loss(outputs,
+                                                    targets.to(self.image_backbone_device), 
+                                                    self.image_backbone, cls_loss_type=cls_loss_type)
+
+                loss_components = {
+                            'lbox':loss_components[0].item(), 
+                            'lobj':loss_components[1].item(),
+                            'lcls':loss_components[2].item()
+                            }
+
+            return total_loss, loss_components, outputs
     
     def combine_features(self, img_feat:torch.Tensor, lidar_feat:torch.Tensor=None):
         
